@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ระบบพยากรณ์อากาศและภัยธรรมชาติ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🌦️</span>
+      <div>
+        <h1>ระบบพยากรณ์อากาศและภัยธรรมชาติ</h1>
+        <p>พยากรณ์อากาศ · ทำนายฝน · วิเคราะห์น้ำท่วม · แผ่นดินไหว · น้ำขึ้นน้ำลง</p>
+      </div>
+    </div>
+    <div class="search">
+      <div class="search-box">
+        <input id="searchInput" type="search" placeholder="ค้นหาเมือง เช่น Chiang Mai, Hat Yai, Phuket" autocomplete="off">
+        <ul id="searchResults" class="results" hidden></ul>
+      </div>
+      <button id="geoBtn" class="btn" title="ใช้ตำแหน่งปัจจุบัน">📍 ตำแหน่งของฉัน</button>
+    </div>
+  </header>
+
+  <div class="locbar">
+    <strong id="locName">—</strong>
+    <span id="locCoord" class="muted"></span>
+    <span id="updated" class="muted"></span>
+    <button id="refreshBtn" class="btn ghost">⟳ รีเฟรช</button>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="overview">🌤️ พยากรณ์อากาศ</button>
+    <button class="tab" data-tab="rain">🌧️ ทำนายฝน</button>
+    <button class="tab" data-tab="flood">🌊 วิเคราะห์น้ำท่วม</button>
+    <button class="tab" data-tab="water">💧 ข้อมูลน้ำ/เขื่อน</button>
+    <button class="tab" data-tab="quake">🌐 แผ่นดินไหว</button>
+    <button class="tab" data-tab="tide">🌙 น้ำขึ้นน้ำลง</button>
+  </nav>
+
+  <main>
+    <!-- ================= พยากรณ์อากาศ ================= -->
+    <section id="tab-overview" class="panel active">
+      <div class="status" id="overviewStatus"></div>
+      <div class="grid-2">
+        <div class="card" id="currentCard"><div class="skeleton">กำลังโหลด…</div></div>
+        <div class="card">
+          <h3>เลือกตำแหน่งบนแผนที่</h3>
+          <div id="pickMap" class="map small"></div>
+          <p class="hint">คลิกบนแผนที่เพื่อเปลี่ยนตำแหน่งที่ต้องการพยากรณ์</p>
+        </div>
+      </div>
+      <div class="card">
+        <h3>พยากรณ์รายชั่วโมง (24 ชั่วโมงข้างหน้า)</h3>
+        <div class="chart-box"><canvas id="hourlyChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>พยากรณ์ล่วงหน้า 16 วัน</h3>
+        <div id="dailyList" class="daily"></div>
+      </div>
+    </section>
+
+    <!-- ================= ทำนายฝน ================= -->
+    <section id="tab-rain" class="panel">
+      <div class="status" id="rainStatus"></div>
+      <div class="tiles" id="rainTiles"></div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>ผลการวิเคราะห์โอกาสเกิดฝน</h3>
+          <div id="rainInsight" class="insight"></div>
+        </div>
+        <div class="card">
+          <h3>เกณฑ์ปริมาณฝน (กรมอุตุนิยมวิทยา)</h3>
+          <table class="legend-table">
+            <tr><td><span class="dot r-light"></span>ฝนเล็กน้อย</td><td>0.1 – 10.0 มม./วัน</td></tr>
+            <tr><td><span class="dot r-mod"></span>ฝนปานกลาง</td><td>10.1 – 35.0 มม./วัน</td></tr>
+            <tr><td><span class="dot r-heavy"></span>ฝนหนัก</td><td>35.1 – 90.0 มม./วัน</td></tr>
+            <tr><td><span class="dot r-vheavy"></span>ฝนหนักมาก</td><td>มากกว่า 90.0 มม./วัน</td></tr>
+          </table>
+          <p class="hint">ดัชนีโอกาสฝน (0–100) คำนวณจาก: ความน่าจะเป็นฝนของแบบจำลอง 55%, ความชื้นสัมพัทธ์ 15%, เมฆปกคลุม 12%, ค่าพลังงานศักย์การพาความร้อน (CAPE) 12% และแนวโน้มความกดอากาศลดลง 6%</p>
+        </div>
+      </div>
+      <div class="card">
+        <h3>ฝนที่ตรวจวัดได้จริง 24 ชม. — สถานีใกล้เคียง <span class="muted">(ThaiWater)</span></h3>
+        <div id="rainObs"><div class="skeleton">กำลังโหลดข้อมูลสถานีวัดฝน…</div></div>
+      </div>
+      <div class="card">
+        <h3>ปริมาณฝนและโอกาสเกิดฝน รายชั่วโมง (72 ชั่วโมง)</h3>
+        <div class="chart-box tall"><canvas id="rainHourlyChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>ปริมาณฝนรายวัน (16 วัน)</h3>
+        <div class="chart-box"><canvas id="rainDailyChart"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ================= น้ำท่วม ================= -->
+    <section id="tab-flood" class="panel">
+      <div class="status" id="floodStatus"></div>
+      <div class="grid-2">
+        <div class="card" id="floodRiskCard"><div class="skeleton">กำลังวิเคราะห์…</div></div>
+        <div class="card">
+          <h3>ปัจจัยที่ใช้วิเคราะห์</h3>
+          <div id="floodFactors"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>อัตราการไหลของแม่น้ำ (m³/s) — ย้อนหลัง 30 วัน และคาดการณ์ 30 วัน</h3>
+        <div class="chart-box tall"><canvas id="dischargeChart"></canvas></div>
+        <p class="hint">ข้อมูลจากแบบจำลอง GloFAS (ความละเอียด ~5 กม.) เกณฑ์เฝ้าระวังคำนวณจากสถิติย้อนหลัง 3 ปีของจุดนั้น — ควรเลือกตำแหน่งใกล้ลำน้ำสายหลักเพื่อผลที่แม่นยำ</p>
+      </div>
+      <div class="card">
+        <h3>ฝนสะสม — ย้อนหลัง 7 วัน และคาดการณ์ล่วงหน้า</h3>
+        <div class="chart-box"><canvas id="floodRainChart"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ================= ข้อมูลน้ำ / เขื่อน (ThaiWater) ================= -->
+    <section id="tab-water" class="panel">
+      <div class="status" id="waterStatus"></div>
+      <div class="tiles" id="waterTiles"></div>
+      <div class="card">
+        <h3>สถานการณ์น้ำใกล้ตำแหน่งของคุณ</h3>
+        <div id="waterNearby" class="nearby"></div>
+      </div>
+      <div class="card">
+        <h3>แผนที่สถานการณ์น้ำ <span class="muted">(เลือกชั้นข้อมูลที่มุมขวาบน)</span></h3>
+        <div id="waterMap" class="map large" style="height:560px"></div>
+        <div class="map-legends" id="waterLegend"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h3>ปริมาณน้ำในเขื่อนขนาดใหญ่ (% ของความจุที่ระดับเก็บกักปกติ)</h3>
+          <div class="chart-box" style="height:780px"><canvas id="damChart"></canvas></div>
+        </div>
+        <div class="card">
+          <h3>สถานีระดับน้ำที่ควรเฝ้าระวัง</h3>
+          <div class="table-wrap scroll-y">
+            <table class="data-table" id="wlTable">
+              <thead><tr><th>สถานี / ลำน้ำ</th><th>จังหวัด</th><th>% ความจุลำน้ำ</th><th>เทียบตลิ่ง</th><th>แนวโน้ม</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>ข้อมูลเขื่อนขนาดใหญ่</h3>
+        <div class="table-wrap">
+          <table class="data-table" id="damTable">
+            <thead><tr><th>เขื่อน</th><th>จังหวัด / ลุ่มน้ำ</th><th>ปริมาณน้ำ (ล้าน ลบ.ม.)</th><th>% รนก.</th><th>น้ำใช้การ</th><th>ไหลเข้า</th><th>ระบาย</th><th>สถานะ</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">% รนก. = ร้อยละของความจุที่ระดับเก็บกักปกติ · น้ำไหลเข้า/ระบาย หน่วย ล้าน ลบ.ม./วัน · ข้อมูลจากคลังข้อมูลน้ำแห่งชาติ (ThaiWater, สสน.) และกรมชลประทาน</p>
+      </div>
+    </section>
+
+    <!-- ================= แผ่นดินไหว ================= -->
+    <section id="tab-quake" class="panel">
+      <div class="status" id="quakeStatus"></div>
+      <div class="card controls">
+        <label>ช่วงเวลา
+          <select id="eqDays">
+            <option value="1">24 ชั่วโมง</option>
+            <option value="7" selected>7 วัน</option>
+            <option value="30">30 วัน</option>
+          </select>
+        </label>
+        <label>ขนาดขั้นต่ำ
+          <select id="eqMag">
+            <option value="1">1.0+</option>
+            <option value="2.5" selected>2.5+</option>
+            <option value="4">4.0+</option>
+            <option value="5">5.0+</option>
+            <option value="6">6.0+</option>
+          </select>
+        </label>
+        <label>พื้นที่
+          <select id="eqRadius">
+            <option value="500">รัศมี 500 กม.</option>
+            <option value="1500">รัศมี 1,500 กม.</option>
+            <option value="3000" selected>รัศมี 3,000 กม.</option>
+            <option value="all">ทั่วโลก</option>
+          </select>
+        </label>
+        <button id="eqReload" class="btn">ค้นหา</button>
+      </div>
+      <div class="tiles" id="quakeTiles"></div>
+      <div class="card">
+        <div id="quakeMap" class="map large"></div>
+        <div class="mag-legend">
+          <span><i style="background:#22c55e"></i>&lt; 3</span>
+          <span><i style="background:#eab308"></i>3–3.9</span>
+          <span><i style="background:#f97316"></i>4–4.9</span>
+          <span><i style="background:#ef4444"></i>5–5.9</span>
+          <span><i style="background:#a21caf"></i>≥ 6</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>รายการแผ่นดินไหว</h3>
+        <div class="table-wrap">
+          <table class="data-table" id="quakeTable">
+            <thead><tr><th>เวลา (ท้องถิ่น)</th><th>ขนาด</th><th>ตำแหน่ง</th><th>ความลึก</th><th>ระยะห่าง</th><th>การรับรู้*</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">* ประเมินอย่างหยาบจากขนาดและระยะทาง ไม่ใช่ข้อมูลทางการ — ข้อมูลจาก USGS Earthquake Hazards Program</p>
+      </div>
+    </section>
+
+    <!-- ================= น้ำขึ้นน้ำลง ================= -->
+    <section id="tab-tide" class="panel">
+      <div class="status" id="tideStatus"></div>
+      <div class="card controls">
+        <span>จุดตรวจวัด:</span>
+        <div class="chips" id="tidePresets"></div>
+      </div>
+      <div class="tiles" id="tideTiles"></div>
+      <div class="card">
+        <h3>ระดับน้ำทะเล (เมตร เทียบกับระดับน้ำทะเลปานกลาง) — 7 วัน</h3>
+        <div class="chart-box tall"><canvas id="tideChart"></canvas></div>
+        <p class="hint">ข้อมูลจาก Open-Meteo Marine (รวมผลของน้ำขึ้นน้ำลงและคลื่นพายุซัดฝั่ง) ความละเอียดใกล้ชายฝั่งจำกัด ใช้เพื่อการวางแผนทั่วไป ไม่ใช่เพื่อการเดินเรือ</p>
+      </div>
+      <div class="card">
+        <h3>ตารางเวลาน้ำขึ้น–น้ำลง</h3>
+        <div class="table-wrap">
+          <table class="data-table" id="tideTable">
+            <thead><tr><th>วันที่</th><th>น้ำขึ้นสูงสุด</th><th>น้ำลงต่ำสุด</th><th>พิสัยน้ำ</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    แหล่งข้อมูล: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (Weather, Flood/GloFAS, Marine) ·
+    <a href="https://earthquake.usgs.gov" target="_blank" rel="noopener">USGS</a> ·
+    <a href="https://www.thaiwater.net" target="_blank" rel="noopener">ThaiWater (สสน.)</a> ·
+    แผนที่ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a><br>
+    ผลการพยากรณ์และวิเคราะห์เป็นข้อมูลประกอบการตัดสินใจเท่านั้น โปรดติดตามประกาศทางการจากกรมอุตุนิยมวิทยาและกรมป้องกันและบรรเทาสาธารณภัย
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
