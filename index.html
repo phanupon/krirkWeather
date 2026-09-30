@@ -40,6 +40,7 @@
     <button class="tab" data-tab="rain">🌧️ ทำนายฝน</button>
     <button class="tab" data-tab="flood">🌊 วิเคราะห์น้ำท่วม</button>
     <button class="tab" data-tab="water">💧 ข้อมูลน้ำ/เขื่อน</button>
+    <button class="tab" data-tab="air">😷 คุณภาพอากาศ</button>
     <button class="tab" data-tab="quake">🌐 แผ่นดินไหว</button>
     <button class="tab" data-tab="tide">🌙 น้ำขึ้นน้ำลง</button>
   </nav>
@@ -161,6 +162,73 @@
       </div>
     </section>
 
+    <!-- ================= คุณภาพอากาศ (Air4Thai + WAQI + CAMS) ================= -->
+    <section id="tab-air" class="panel">
+      <div class="status" id="airStatus"></div>
+      <div class="air-hero" id="airHero"><div class="card"><div class="skeleton">กำลังโหลดข้อมูลคุณภาพอากาศ…</div></div></div>
+
+      <div class="card">
+        <div class="air-toolbar">
+          <label>แหล่งข้อมูล
+            <select id="airSource">
+              <option value="a4t">Air4Thai · กรมควบคุมมลพิษ (AQI ไทย)</option>
+              <option value="waqi">WAQI · aqicn.org (US AQI)</option>
+            </select>
+          </label>
+          <label id="airMetricWrap">แสดงค่า
+            <select id="airMetric">
+              <option value="AQI">AQI รวม</option>
+              <option value="PM25">PM2.5</option>
+              <option value="PM10">PM10</option>
+              <option value="O3">โอโซน (O₃)</option>
+              <option value="CO">คาร์บอนมอนอกไซด์ (CO)</option>
+              <option value="NO2">ไนโตรเจนไดออกไซด์ (NO₂)</option>
+              <option value="SO2">ซัลเฟอร์ไดออกไซด์ (SO₂)</option>
+            </select>
+          </label>
+          <label class="grow">สถานี <select id="airStation"></select></label>
+          <button id="airNearest" class="btn">📍 สถานีใกล้ตำแหน่งหลัก</button>
+        </div>
+        <div id="airMap" class="map large" style="height:560px"></div>
+        <div class="map-legends" id="airLegend"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>พยากรณ์ PM2.5 รายวัน <span class="muted">(ค่าเฉลี่ย 24 ชม.)</span></h3>
+          <div id="airDaily" class="air-daily"><div class="skeleton">กำลังสร้างแบบจำลอง…</div></div>
+          <div id="airSkill"></div>
+        </div>
+        <div class="card">
+          <h3>ภาพรวมทั่วประเทศ <span class="muted" id="airNatTime"></span></h3>
+          <div id="airDist"></div>
+          <h4 class="sub">10 สถานีที่ค่า AQI สูงสุดขณะนี้</h4>
+          <ol id="airTop" class="rank"></ol>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>ทำนาย PM2.5 รายชั่วโมง — ค่าตรวจวัดจริงเทียบกับแบบจำลอง</h3>
+        <div id="airInsight" class="insight"></div>
+        <div class="chart-box tall"><canvas id="airForecastChart"></canvas></div>
+        <p class="hint" id="airModelNote"></p>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>ปัจจัยที่มีผลต่อ PM2.5 ใน 24 ชม. ข้างหน้า</h3>
+          <div class="chart-box"><canvas id="airFactorChart"></canvas></div>
+          <p class="hint">แสดงผลของแต่ละปัจจัยเทียบกับสภาพเฉลี่ยในช่วง 14 วันที่ผ่านมาของสถานีนี้ · แท่งสีแดง = ทำให้ PM2.5 เพิ่มขึ้น · สีเขียว = ทำให้ลดลง</p>
+        </div>
+        <div class="card">
+          <h3>องค์ประกอบมลพิษและตัวแปรอุตุนิยมวิทยา <span class="muted">(48 ชม. ย้อนหลัง + 72 ชม. ข้างหน้า)</span></h3>
+          <div class="spark-grid" id="airComponents"></div>
+        </div>
+      </div>
+
+      <div class="card" id="airWaqi"></div>
+    </section>
+
     <!-- ================= แผ่นดินไหว ================= -->
     <section id="tab-quake" class="panel">
       <div class="status" id="quakeStatus"></div>
@@ -243,6 +311,8 @@
     แหล่งข้อมูล: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (Weather, Flood/GloFAS, Marine) ·
     <a href="https://earthquake.usgs.gov" target="_blank" rel="noopener">USGS</a> ·
     <a href="https://www.thaiwater.net" target="_blank" rel="noopener">ThaiWater (สสน.)</a> ·
+    <a href="http://air4thai.pcd.go.th" target="_blank" rel="noopener">Air4Thai (กรมควบคุมมลพิษ)</a> ·
+    <a href="https://waqi.info" target="_blank" rel="noopener">World Air Quality Index Project</a> ·
     แผนที่ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a><br>
     ผลการพยากรณ์และวิเคราะห์เป็นข้อมูลประกอบการตัดสินใจเท่านั้น โปรดติดตามประกาศทางการจากกรมอุตุนิยมวิทยาและกรมป้องกันและบรรเทาสาธารณภัย
   </footer>

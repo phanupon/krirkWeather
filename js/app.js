@@ -199,6 +199,7 @@ async function setLocation(loc) {
   saveLoc(state.loc);
   state.loaded = {};
   state.tideLoc = null;
+  state.airStationId = null; // เลือกสถานีอากาศที่ใกล้ตำแหน่งใหม่
   renderLocBar();
   pickMarker?.setLatLng([state.loc.lat, state.loc.lon]);
   state.maps.pick?.setView([state.loc.lat, state.loc.lon], Math.max(state.maps.pick.getZoom(), 7));
@@ -302,6 +303,7 @@ function ensureTab(tab) {
   if (state.loaded[tab]) return;
   if (tab === 'flood' && state.weather) { state.loaded.flood = true; loadFlood(); }
   if (tab === 'water') { state.loaded.water = true; loadWater(); }
+  if (tab === 'air') { state.loaded.air = true; loadAir(); }
   if (tab === 'quake') { state.loaded.quake = true; loadQuakes(); }
   if (tab === 'tide') { state.loaded.tide = true; loadTide(); }
 }
@@ -1140,6 +1142,618 @@ function renderRainObs(tw) {
       `<li><span>${r.name} <small class="muted">อ.${r.amphoe} · ${fmt(r.dist, 1)} กม.</small></span><span style="color:${rainColor(r.r24)}">${fmt(r.r24, 1)} มม.</span></li>`).join('')}</ul>
       <p class="hint">ข้อมูล ณ ${nb.rainMax.time} · ${nb.rainNear.length} สถานีในรัศมี ${nb.rainR} กม.</p></div>
   </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* คุณภาพอากาศ                                                          */
+/*   Air4Thai (กรมควบคุมมลพิษ) : AQI ไทย + ประวัติรายชั่วโมง (ใช้ฝึกแบบจำลอง) */
+/*   WAQI (aqicn.org)           : สถานีเพิ่มเติม + พยากรณ์รายวัน (US AQI)    */
+/*   Open-Meteo Air Quality     : องค์ประกอบมลพิษจากแบบจำลอง CAMS           */
+/* ------------------------------------------------------------------ */
+
+const A4T_BASE = 'https://air4thai.com/forweb/';
+// WAQI token ของผู้ใช้ (ออกแบบมาให้ใช้ฝั่งเบราว์เซอร์ได้) — ขอใหม่ได้ที่ https://aqicn.org/data-platform/token/
+const WAQI_TOKEN = '2d05287b0fa774bb404a076e1f21d5e0b40ee978';
+const TH_BOUNDS = [[5.6, 97.3], [20.5, 105.7]];
+const BKK_OFFSET = 7 * 3600;
+
+// ระดับ AQI ของประเทศไทย (กรมควบคุมมลพิษ)
+const THAI_AQI = [
+  { max: 25, name: 'ดีมาก', color: '#3BCCFF', text: '#0b3a4a', advice: 'คุณภาพอากาศดีมาก เหมาะสำหรับกิจกรรมกลางแจ้งและการท่องเที่ยว' },
+  { max: 50, name: 'ดี', color: '#92D050', text: '#1f3d0c', advice: 'คุณภาพอากาศดี สามารถทำกิจกรรมกลางแจ้งและการท่องเที่ยวได้ตามปกติ' },
+  { max: 100, name: 'ปานกลาง', color: '#FFFF00', text: '#4a4a00', advice: 'ประชาชนทั่วไปทำกิจกรรมกลางแจ้งได้ตามปกติ ผู้ที่ต้องดูแลสุขภาพเป็นพิเศษ หากมีอาการ เช่น ไอ หายใจลำบาก ระคายเคืองตา ควรลดระยะเวลาทำกิจกรรมกลางแจ้ง' },
+  { max: 200, name: 'เริ่มมีผลกระทบต่อสุขภาพ', color: '#FFA200', text: '#4a2e00', advice: 'ควรเฝ้าระวังสุขภาพ ลดระยะเวลาทำกิจกรรมกลางแจ้ง หรือใช้อุปกรณ์ป้องกันตนเองหากมีความจำเป็น เด็ก ผู้สูงอายุ และผู้มีโรคประจำตัวควรหลีกเลี่ยงกิจกรรมกลางแจ้ง' },
+  { max: Infinity, name: 'มีผลกระทบต่อสุขภาพ', color: '#F04646', text: '#ffffff', advice: 'ทุกคนควรหลีกเลี่ยงกิจกรรมกลางแจ้ง ปิดประตูหน้าต่าง สวมหน้ากาก N95 เมื่อออกนอกอาคาร หากมีอาการผิดปกติให้ปรึกษาแพทย์' },
+];
+const thaiLevel = aqi => THAI_AQI.find(l => aqi <= l.max);
+const thaiLevelById = id => THAI_AQI[+id - 1] || null; // color_id ของ Air4Thai (1–5, 0 = ไม่มีข้อมูล)
+
+// ระดับ US AQI (WAQI)
+const US_AQI = [
+  { max: 50, name: 'ดี', color: '#009966', text: '#fff' },
+  { max: 100, name: 'ปานกลาง', color: '#FFDE33', text: '#3d3500' },
+  { max: 150, name: 'มีผลต่อกลุ่มเสี่ยง', color: '#FF9933', text: '#3d1f00' },
+  { max: 200, name: 'มีผลต่อสุขภาพ', color: '#CC0033', text: '#fff' },
+  { max: 300, name: 'มีผลต่อสุขภาพมาก', color: '#660099', text: '#fff' },
+  { max: Infinity, name: 'อันตราย', color: '#7E0023', text: '#fff' },
+];
+const usLevel = aqi => US_AQI.find(l => aqi <= l.max);
+
+/** PM2.5 (µg/m³, เฉลี่ย 24 ชม.) → AQI ไทย ตามเกณฑ์ปี 2566 */
+function pm25ToThaiAqi(c) {
+  const bp = [[0, 15, 0, 25], [15.1, 25, 26, 50], [25.1, 37.5, 51, 100], [37.6, 75, 101, 200]];
+  const r = bp.find(([, hi]) => c <= hi);
+  if (!r) return Math.round(201 + (c - 75.1) * (99 / 37.4));
+  const [lo, hi, alo, ahi] = r;
+  return Math.round(alo + (Math.max(c, lo) - lo) * (ahi - alo) / (hi - lo));
+}
+
+const POLLUTANTS = [
+  { key: 'PM25', name: 'PM2.5', unit: 'µg/m³' },
+  { key: 'PM10', name: 'PM10', unit: 'µg/m³' },
+  { key: 'O3', name: 'โอโซน (O₃)', unit: 'ppb' },
+  { key: 'CO', name: 'คาร์บอนมอนอกไซด์ (CO)', unit: 'ppm' },
+  { key: 'NO2', name: 'ไนโตรเจนไดออกไซด์ (NO₂)', unit: 'ppb' },
+  { key: 'SO2', name: 'ซัลเฟอร์ไดออกไซด์ (SO₂)', unit: 'ppb' },
+];
+
+const ymdOf = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hourKey = d => `${ymdOf(d)}T${String(d.getHours()).padStart(2, '0')}`;
+
+/* ---------- โหลดข้อมูลสถานี ---------- */
+
+function loadAir4Thai() {
+  if (state.a4tPromise && Date.now() - state.a4tTime < 10 * 60e3) return state.a4tPromise;
+  state.a4tTime = Date.now();
+  state.a4tPromise = getJSON(A4T_BASE + 'getAQI_JSON.php', 30e3).then(j => {
+    const list = (j.stations || []).map(s => {
+      const L = s.AQILast || {};
+      const aqi = num(L.AQI?.aqi);
+      return {
+        id: s.stationID, name: s.nameTH, nameEN: s.nameEN, area: s.areaTH, type: s.stationType,
+        province: (s.areaTH || '').split(',').pop().trim(),
+        lat: +s.lat, lon: +s.long, date: L.date, time: L.time,
+        aqi: aqi != null && aqi >= 0 ? aqi : null, aqiColor: L.AQI?.color_id, dominant: L.AQI?.param,
+        p: Object.fromEntries(POLLUTANTS.map(p => {
+          const v = num(L[p.key]?.value), a = num(L[p.key]?.aqi);
+          return [p.key, { value: v != null && v >= 0 ? v : null, aqi: a != null && a >= 0 ? a : null, color: L[p.key]?.color_id }];
+        })),
+      };
+    }).filter(s => isFinite(s.lat) && isFinite(s.lon));
+    const latest = list.map(s => `${s.date} ${s.time}`).sort().pop();
+    list.forEach(s => { s.stale = `${s.date} ${s.time}` < latest.slice(0, 10) + ' 00:00' || s.aqi == null; });
+    return { list, latest };
+  });
+  state.a4tPromise.catch(() => { state.a4tTime = 0; });
+  return state.a4tPromise;
+}
+
+function loadWaqiBounds() {
+  if (state.waqiPromise) return state.waqiPromise;
+  const [[s, w], [n, e]] = TH_BOUNDS;
+  state.waqiPromise = getJSON(`https://api.waqi.info/map/bounds/?latlng=${s},${w},${n},${e}&networks=all&token=${WAQI_TOKEN}`, 30e3)
+    .then(j => {
+      if (j.status !== 'ok') throw new Error(j.data || 'WAQI error');
+      return j.data.filter(x => x.aqi !== '-' && isFinite(+x.aqi))
+        .map(x => ({ uid: x.uid, lat: x.lat, lon: x.lon, aqi: +x.aqi, name: x.station?.name, time: x.station?.time }));
+    });
+  state.waqiPromise.catch(() => { state.waqiPromise = null; });
+  return state.waqiPromise;
+}
+
+async function waqiFeed(path) {
+  const j = await getJSON(`https://api.waqi.info/feed/${path}/?token=${WAQI_TOKEN}`, 20e3);
+  if (j.status !== 'ok') throw new Error(j.data || 'WAQI error');
+  return j.data;
+}
+
+/* ---------- แท็บหลัก ---------- */
+
+async function loadAir() {
+  setStatus('airStatus', 'กำลังโหลดข้อมูลสถานีตรวจวัดคุณภาพอากาศ…', 'loading');
+  try {
+    const a4t = await loadAir4Thai();
+    state.a4t = a4t;
+    initAirControls(a4t);
+    await renderAirMap();
+    renderAirNational(a4t);
+    const st = a4t.list.find(s => s.id === state.airStationId) || nearestAirStation();
+    setStatus('airStatus', '');
+    selectAirStation(st.id, false);
+  } catch (e) {
+    setStatus('airStatus', `โหลดข้อมูล Air4Thai ไม่สำเร็จ: ${e.message}`, 'error');
+  }
+}
+
+function nearestAirStation() {
+  const { lat, lon } = state.loc;
+  return state.a4t.list.filter(s => !s.stale)
+    .reduce((a, b) => (haversine(lat, lon, b.lat, b.lon) < haversine(lat, lon, a.lat, a.lon) ? b : a));
+}
+
+function initAirControls(a4t) {
+  // รายชื่อสถานีจัดกลุ่มตามจังหวัด
+  const byProv = {};
+  a4t.list.filter(s => s.aqi != null).forEach(s => (byProv[s.province] ||= []).push(s));
+  $('#airStation').innerHTML = Object.keys(byProv).sort((a, b) => a.localeCompare(b, 'th')).map(p =>
+    `<optgroup label="${p}">${byProv[p].sort((a, b) => a.name.localeCompare(b.name, 'th'))
+      .map(s => `<option value="${s.id}">${s.name} — AQI ${s.aqi}${s.stale ? ' (ข้อมูลเก่า)' : ''}</option>`).join('')}</optgroup>`).join('');
+  if (state.airControlsBound) return;
+  state.airControlsBound = true;
+  $('#airStation').addEventListener('change', e => selectAirStation(e.target.value, true));
+  $('#airNearest').addEventListener('click', () => selectAirStation(nearestAirStation().id, true));
+  $('#airMetric').addEventListener('change', renderAirMap);
+  $('#airSource').addEventListener('change', () => {
+    $('#airMetricWrap').style.display = $('#airSource').value === 'a4t' ? '' : 'none';
+    renderAirMap();
+  });
+}
+
+function airPin(value, lvl, extra = '') {
+  const w = String(value).length > 2 ? 38 : 32;
+  return L.divIcon({
+    className: 'aq-icon', iconSize: [w, 22], iconAnchor: [w / 2, 11],
+    html: `<div class="aq-pin ${extra}" style="background:${lvl.color};color:${lvl.text}">${value}</div>`,
+  });
+}
+
+async function renderAirMap() {
+  if (!state.maps.air) {
+    const map = L.map('airMap', { zoomSnap: 0.25 }).fitBounds(TH_BOUNDS);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© OpenStreetMap' }).addTo(map);
+    state.maps.air = map;
+    state.airLayer = L.layerGroup().addTo(map);
+  }
+  const layer = state.airLayer;
+  layer.clearLayers();
+  state.airMarkers = {};
+  const source = $('#airSource').value, metric = $('#airMetric').value;
+
+  if (source === 'a4t') {
+    state.a4t.list.forEach(s => {
+      const m = metric === 'AQI' ? { value: s.aqi, color: s.aqiColor } : { value: s.p[metric].value, color: s.p[metric].color };
+      const lvl = thaiLevelById(m.color);
+      if (m.value == null || !lvl) return;
+      const cls = [s.stale ? 'stale' : '', s.id === state.airStationId ? 'sel' : ''].join(' ');
+      const mk = L.marker([s.lat, s.lon], { icon: airPin(Math.round(m.value * 10) / 10, lvl, cls), zIndexOffset: s.id === state.airStationId ? 1000 : m.value })
+        .bindTooltip(`<b>${s.name}</b><br>${s.area}<br>AQI ${s.aqi ?? '–'} · PM2.5 ${fmt(s.p.PM25.value, 1)} µg/m³<br><small>${s.date} ${s.time} น.</small>`, { direction: 'top', offset: [0, -10] })
+        .on('click', () => selectAirStation(s.id, true))
+        .addTo(layer);
+      state.airMarkers[s.id] = mk;
+    });
+    $('#airLegend').innerHTML = `<span><b>AQI ไทย (กรมควบคุมมลพิษ):</b>${THAI_AQI.map((l, i) =>
+      `<i style="background:${l.color}"></i>${[0, 26, 51, 101, 201][i]}${i < 4 ? '–' + l.max : '+'} ${l.name}`).join('')}</span>` +
+      '<span>จุดจาง = ข้อมูลไม่เป็นปัจจุบัน · คลิกสถานีเพื่อดูรายละเอียดและผลการทำนาย</span>';
+  } else {
+    setStatus('airStatus', 'กำลังโหลดสถานีจาก WAQI…', 'loading');
+    try {
+      const list = await loadWaqiBounds();
+      setStatus('airStatus', '');
+      list.forEach(x => {
+        const lvl = usLevel(x.aqi);
+        L.marker([x.lat, x.lon], { icon: airPin(x.aqi, lvl), zIndexOffset: x.aqi })
+          .bindPopup('<div class="muted">กำลังโหลด…</div>', { minWidth: 240 })
+          .on('popupopen', async ev => {
+            try {
+              const d = await waqiFeed('@' + x.uid);
+              ev.popup.setContent(waqiPopup(d));
+            } catch (e) { ev.popup.setContent(`โหลดไม่สำเร็จ: ${e.message}`); }
+          })
+          .addTo(layer);
+      });
+      $('#airLegend').innerHTML = `<span><b>US AQI (WAQI):</b>${US_AQI.map((l, i) =>
+        `<i style="background:${l.color}"></i>${[0, 51, 101, 151, 201, 301][i]}${isFinite(l.max) ? '–' + l.max : '+'} ${l.name}`).join('')}</span>` +
+        `<span>${list.length} สถานี (รวมเครือข่ายเซนเซอร์ชุมชนและประเทศเพื่อนบ้าน) · คลิกเพื่อดูรายละเอียด</span>`;
+    } catch (e) {
+      setStatus('airStatus', `โหลดข้อมูล WAQI ไม่สำเร็จ: ${e.message}`, 'error');
+    }
+  }
+}
+
+const IAQI_NAMES = { pm25: 'PM2.5', pm10: 'PM10', o3: 'O₃', no2: 'NO₂', so2: 'SO₂', co: 'CO', t: 'อุณหภูมิ °C', h: 'ความชื้น %', w: 'ลม m/s', p: 'ความกดอากาศ hPa' };
+function waqiPopup(d) {
+  const lvl = usLevel(+d.aqi || 0);
+  const iaqi = Object.entries(d.iaqi || {}).filter(([k]) => IAQI_NAMES[k])
+    .map(([k, v]) => `<span>${IAQI_NAMES[k]} <b>${fmt(v.v, 1)}</b></span>`).join('');
+  return `<b>${d.city?.name || ''}</b><br>
+    <span class="badge" style="background:${lvl.color};color:${lvl.text}">US AQI ${d.aqi} · ${lvl.name}</span>
+    มลพิษหลัก: <b>${(d.dominentpol || '').toUpperCase()}</b><div class="iaqi">${iaqi}</div>
+    <small class="muted">${d.time?.s || ''} · ค่ามลพิษเป็นดัชนีย่อย (US AQI)<br>${(d.attributions || []).map(a => a.name).join(' · ')}</small>`;
+}
+
+function renderAirNational(a4t) {
+  const cur = a4t.list.filter(s => !s.stale && s.aqi != null);
+  $('#airNatTime').textContent = `(${cur.length} สถานี · ${a4t.latest} น.)`;
+  const counts = THAI_AQI.map((_, i) => cur.filter(s => +s.aqiColor === i + 1).length);
+  $('#airDist').innerHTML = `<div class="dist-bar">${THAI_AQI.map((l, i) => counts[i]
+    ? `<span style="flex:${counts[i]};background:${l.color};color:${l.text}" title="${l.name}: ${counts[i]} สถานี">${counts[i]}</span>` : '').join('')}</div>
+    <div class="dist-legend">${THAI_AQI.map((l, i) => `<span><i style="background:${l.color}"></i>${l.name} ${counts[i]}</span>`).join('')}</div>`;
+  const top = [...cur].sort((a, b) => b.aqi - a.aqi).slice(0, 10);
+  $('#airTop').innerHTML = top.map(s => {
+    const l = thaiLevelById(s.aqiColor);
+    return `<li data-id="${s.id}"><span class="badge" style="background:${l.color};color:${l.text}">${s.aqi}</span>${s.name} <small class="muted">${s.province}</small></li>`;
+  }).join('');
+  $('#airTop').onclick = e => {
+    const li = e.target.closest('li[data-id]');
+    if (li) selectAirStation(li.dataset.id, true);
+  };
+}
+
+/* ---------- สถานีที่เลือก ---------- */
+
+function selectAirStation(id, fly) {
+  const s = state.a4t.list.find(x => x.id === id);
+  if (!s) return;
+  state.airStationId = id;
+  $('#airStation').value = id;
+  if ($('#airSource').value === 'a4t') renderAirMap();
+  if (fly) state.maps.air.flyTo([s.lat, s.lon], Math.max(state.maps.air.getZoom(), 9), { duration: .8 });
+  renderAirHero(s);
+  runAirModel(s);
+  renderWaqiCompare(s);
+}
+
+function aqiRing(value, lvl, max = 200) {
+  const r = 52, c = 2 * Math.PI * r, frac = clamp((value ?? 0) / max, 0, 1);
+  return `<svg class="aqi-ring" viewBox="0 0 128 128">
+    <circle cx="64" cy="64" r="${r}" fill="none" stroke="var(--border)" stroke-width="12"/>
+    <circle cx="64" cy="64" r="${r}" fill="none" stroke="${lvl?.color || '#94a3b8'}" stroke-width="12" stroke-linecap="round"
+      stroke-dasharray="${c * frac} ${c}" transform="rotate(-90 64 64)"/>
+    <text x="64" y="66" text-anchor="middle" class="val">${value ?? '–'}</text>
+    <text x="64" y="86" text-anchor="middle" class="lbl">AQI</text>
+  </svg>`;
+}
+
+function renderAirHero(s) {
+  const lvl = thaiLevelById(s.aqiColor) || THAI_AQI[0];
+  const dist = haversine(state.loc.lat, state.loc.lon, s.lat, s.lon);
+  const pols = POLLUTANTS.map(p => {
+    const v = s.p[p.key], pl = thaiLevelById(v.color);
+    return `<div class="pol ${v.value == null ? 'na' : ''}" style="--c:${pl?.color || 'var(--border)'}">
+      <div class="p-name">${p.name}</div>
+      <div class="p-val">${v.value == null ? '–' : fmt(v.value, p.key === 'CO' ? 2 : 1)} <small>${p.unit}</small></div>
+      <div class="p-aqi">${v.aqi != null ? `AQI ${v.aqi} · <b style="color:${pl?.color}">${pl?.name || ''}</b>` : '<span class="muted">ไม่มีการตรวจวัด</span>'}</div>
+    </div>`;
+  }).join('');
+  $('#airHero').innerHTML = `
+    <div class="card aqi-main" style="--lvl:${lvl.color};--lvl-soft:${lvl.color}33">
+      <div class="ring-wrap">
+        ${aqiRing(s.aqi, lvl)}
+        <div>
+          <div class="st-name">${s.name}</div>
+          <div class="muted" style="font-size:.85rem">${s.area}</div>
+          <span class="lvl-badge" style="background:${lvl.color};color:${lvl.text}">${lvl.name}</span>
+          <div class="muted" style="font-size:.8rem">มลพิษหลัก ${POLLUTANTS.find(p => p.key === s.dominant)?.name || s.dominant || '–'} · ${s.date} ${s.time} น.<br>ห่างจากตำแหน่งหลัก ${fmt(dist, 1)} กม.</div>
+        </div>
+      </div>
+      <div class="advice-box">💡 ${lvl.advice}</div>
+    </div>
+    <div class="card">
+      <h3>ค่ามลพิษที่ตรวจวัดได้ <span class="muted">(ค่าเฉลี่ยตามมาตรฐานกรมควบคุมมลพิษ)</span></h3>
+      <div class="pol-grid">${pols}</div>
+    </div>`;
+}
+
+/* ---------- แบบจำลองทำนาย PM2.5 ---------- */
+
+/** แก้ระบบสมการเชิงเส้นด้วย Gaussian elimination (partial pivoting) */
+function solveLinear(A, b) {
+  const n = b.length, M = A.map((r, i) => [...r, b[i]]);
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]];
+    for (let r = c + 1; r < n; r++) {
+      const f = M[r][c] / M[c][c];
+      for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  const x = Array(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = M[r][n];
+    for (let k = r + 1; k < n; k++) s -= M[r][k] * x[k];
+    x[r] = s / M[r][r];
+  }
+  return x;
+}
+
+/** Ridge regression บนตัวแปรที่ปรับมาตรฐานแล้ว */
+function ridgeFit(X, y, lambda = 3) {
+  const n = X.length, p = X[0].length;
+  const mu = Array(p).fill(0), sd = Array(p).fill(0);
+  X.forEach(r => r.forEach((v, j) => { mu[j] += v / n; }));
+  X.forEach(r => r.forEach((v, j) => { sd[j] += (v - mu[j]) ** 2 / n; }));
+  for (let j = 0; j < p; j++) sd[j] = Math.sqrt(sd[j]) || 1;
+  const z = r => [1, ...r.map((v, j) => (v - mu[j]) / sd[j])];
+  const P = p + 1, A = Array.from({ length: P }, () => Array(P).fill(0)), b = Array(P).fill(0);
+  X.forEach((r, i) => {
+    const zi = z(r);
+    for (let a = 0; a < P; a++) {
+      b[a] += zi[a] * y[i];
+      for (let c = 0; c < P; c++) A[a][c] += zi[a] * zi[c];
+    }
+  });
+  for (let a = 1; a < P; a++) A[a][a] += lambda;
+  const w = solveLinear(A, b);
+  return { w, z, predict: r => z(r).reduce((s, v, j) => s + v * w[j], 0) };
+}
+
+// ตัวแปรต้นของแบบจำลอง (group = รวมผลในกราฟปัจจัย, hi/lo = คำอธิบายเมื่อค่าสูง/ต่ำกว่าเฉลี่ย 14 วัน)
+const AIR_FEATURES = [
+  { label: 'PM2.5 จากแบบจำลอง CAMS', group: 'cams', hi: 'สูงกว่าปกติ', lo: 'ต่ำกว่าปกติ' },
+  { label: 'คาร์บอนมอนอกไซด์ (การเผาไหม้/เผาชีวมวล)', group: 'co', hi: 'สูงกว่าปกติ', lo: 'ต่ำกว่าปกติ' },
+  { label: 'ไนโตรเจนไดออกไซด์ (การจราจร/อุตสาหกรรม)', group: 'no2', hi: 'สูงกว่าปกติ', lo: 'ต่ำกว่าปกติ' },
+  { label: 'ฝุ่นละอองในบรรยากาศ (AOD)', group: 'aod', hi: 'หนากว่าปกติ', lo: 'บางกว่าปกติ' },
+  { label: 'ชั้นผสมอากาศ', group: 'blh', hi: 'สูงกว่าปกติ (ระบายอากาศดี)', lo: 'ต่ำกว่าปกติ (ฝุ่นถูกกักใกล้พื้น)' },
+  { label: 'ลม', group: 'wind', hi: 'แรงกว่าปกติ', lo: 'อ่อนกว่าปกติ' },
+  { label: 'ความชื้นสัมพัทธ์', group: 'rh', hi: 'สูงกว่าปกติ', lo: 'ต่ำกว่าปกติ' },
+  { label: 'ฝนสะสม 6 ชม.', group: 'rain', hi: 'มากกว่าปกติ (ชะล้างฝุ่น)', lo: 'น้อยกว่าปกติ (ชะล้างฝุ่นได้น้อย)' },
+  { label: 'อุณหภูมิ', group: 'temp', hi: 'สูงกว่าปกติ', lo: 'ต่ำกว่าปกติ' },
+  { label: 'ช่วงเวลาของวัน', group: 'hour' },
+  { label: 'ช่วงเวลาของวัน', group: 'hour' },
+];
+
+async function runAirModel(s) {
+  const token = (state.airModelToken = {});
+  $('#airDaily').innerHTML = '<div class="skeleton">กำลังดึงข้อมูลย้อนหลัง 14 วันและสร้างแบบจำลอง…</div>';
+  $('#airSkill').innerHTML = '';
+  $('#airInsight').innerHTML = '';
+  try {
+    const now = nowAt(BKK_OFFSET);
+    const start = new Date(now); start.setDate(start.getDate() - 14);
+    const tz = 'Asia%2FBangkok';
+    const [hist, met, aq] = await Promise.all([
+      getJSON(`${A4T_BASE}getHistoryData.php?stationID=${s.id}&param=PM25&type=hr&sdate=${ymdOf(start)}&edate=${ymdOf(now)}&stime=00&etime=23`, 30e3),
+      getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&hourly=boundary_layer_height,wind_speed_10m,relative_humidity_2m,precipitation,temperature_2m&timezone=${tz}&past_days=14&forecast_days=4`),
+      getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${s.lat}&longitude=${s.lon}&hourly=pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,dust,aerosol_optical_depth&timezone=${tz}&past_days=14&forecast_days=4`),
+    ]);
+    if (token !== state.airModelToken) return; // ผู้ใช้เปลี่ยนสถานีระหว่างโหลด
+    if (hist.result !== 'OK') throw new Error(hist.error || 'Air4Thai history error');
+
+    const obs = {};
+    (hist.stations?.[0]?.data || []).forEach(r => {
+      if (r.PM25 != null && r.PM25 >= 0) obs[r.DATETIMEDATA.slice(0, 13).replace(' ', 'T')] = r.PM25;
+    });
+    const mh = met.hourly, ah = aq.hourly;
+    const aIdx = Object.fromEntries(ah.time.map((t, i) => [t, i]));
+    const rows = mh.time.map((t, i) => {
+      const j = aIdx[t];
+      if (j == null) return null;
+      const vals = [ah.pm2_5[j], ah.carbon_monoxide[j], ah.nitrogen_dioxide[j], ah.aerosol_optical_depth[j],
+        mh.boundary_layer_height[i], mh.wind_speed_10m[i], mh.relative_humidity_2m[i], mh.temperature_2m[i]];
+      if (vals.some(v => v == null)) return null;
+      const hr = +t.slice(11, 13);
+      const rain6 = sum(mh.precipitation.slice(Math.max(0, i - 5), i + 1));
+      return {
+        t, key: t.slice(0, 13), cams: ah.pm2_5[j], obs: obs[t.slice(0, 13)],
+        x: [Math.log(ah.pm2_5[j] + 1), Math.log(ah.carbon_monoxide[j]), Math.log(ah.nitrogen_dioxide[j] + 1), ah.aerosol_optical_depth[j],
+          Math.log(mh.boundary_layer_height[i] + 10), mh.wind_speed_10m[i], mh.relative_humidity_2m[i], Math.log(rain6 + 1),
+          mh.temperature_2m[i], Math.sin(2 * Math.PI * hr / 24), Math.cos(2 * Math.PI * hr / 24)],
+      };
+    }).filter(Boolean);
+
+    const nowKey = hourKey(now);
+    const train = rows.filter(r => r.key <= nowKey && r.obs != null);
+    const future = rows.filter(r => r.key > nowKey).slice(0, 72);
+    if (train.length < 120) throw new Error(`ข้อมูลตรวจวัดย้อนหลังไม่พอสำหรับฝึกแบบจำลอง (${train.length} ชม.)`);
+
+    // --- ตรวจสอบความแม่นยำ: ฝึกโดยไม่ใช้ 48 ชม. ล่าสุด แล้วทดสอบกับช่วงนั้น ---
+    const VAL = 48, fitRows = train.slice(0, -VAL), valRows = train.slice(-VAL);
+    const mVal = ridgeFit(fitRows.map(r => r.x), fitRows.map(r => Math.log(r.obs + 1)));
+    const valPred = { model: [], cams: [], blend: [] };
+    valRows.forEach(r => {
+      const m = Math.max(0, Math.exp(mVal.predict(r.x)) - 1);
+      valPred.model.push(m); valPred.cams.push(r.cams); valPred.blend.push((m + r.cams) / 2);
+    });
+    const mae = arr => sum(arr.map((v, i) => Math.abs(v - valRows[i].obs))) / arr.length;
+    const skill = Object.fromEntries(Object.keys(valPred).map(k => [k, mae(valPred[k])]));
+    const best = Object.keys(skill).reduce((a, b) => (skill[b] < skill[a] ? b : a));
+    const logErr = valPred[best].map((v, i) => Math.log(v + 1) - Math.log(valRows[i].obs + 1));
+    const bias = sum(logErr) / logErr.length;
+    const sigma = Math.sqrt(sum(logErr.map(e => (e - bias) ** 2)) / logErr.length);
+
+    // --- ฝึกด้วยข้อมูลทั้งหมด แล้วทำนายล่วงหน้า ---
+    const model = ridgeFit(train.map(r => r.x), train.map(r => Math.log(r.obs + 1)));
+    future.forEach(r => {
+      r.model = Math.max(0, Math.exp(model.predict(r.x)) - 1);
+      r.pred = best === 'model' ? r.model : best === 'cams' ? r.cams : (r.model + r.cams) / 2;
+      r.lo = Math.max(0, (r.pred + 1) * Math.exp(-1.28 * sigma) - 1);
+      r.hi = (r.pred + 1) * Math.exp(1.28 * sigma) - 1;
+    });
+
+    // ผลของปัจจัยในอีก 24 ชม. (log-space → % เปลี่ยนแปลง)
+    const next24 = future.slice(0, 24);
+    const contrib = {}, zAvg = {};
+    next24.forEach(r => {
+      const z = model.z(r.x);
+      AIR_FEATURES.forEach((f, j) => {
+        contrib[f.group] = (contrib[f.group] || 0) + model.w[j + 1] * z[j + 1] / next24.length;
+        zAvg[f.group] = (zAvg[f.group] || 0) + z[j + 1] / next24.length;
+      });
+    });
+
+    state.airModel = { s, rows, train, future, skill, best, sigma, contrib, zAvg, model, nowKey };
+    renderAirForecast(state.airModel);
+  } catch (e) {
+    if (token !== state.airModelToken) return;
+    $('#airDaily').innerHTML = `<p class="muted">สร้างแบบจำลองไม่สำเร็จ: ${e.message}</p>`;
+    state.charts.airForecastChart?.destroy();
+    state.charts.airFactorChart?.destroy();
+  }
+}
+
+const METHOD_NAMES = { model: 'แบบจำลองทางสถิติ (Ridge)', cams: 'แบบจำลอง CAMS โดยตรง', blend: 'ค่าเฉลี่ยของทั้งสองแบบ' };
+
+function renderAirForecast(M) {
+  const { rows, future, skill, best, contrib, zAvg, nowKey, s } = M;
+  const pastRows = rows.filter(r => r.key <= nowKey).slice(-24 * 7);
+
+  // ---------- รายวัน ----------
+  const byDay = {};
+  [...rows.filter(r => r.key <= nowKey && r.obs != null), ...future].forEach(r => {
+    const d = r.t.slice(0, 10), v = r.key <= nowKey ? r.obs : r.pred;
+    (byDay[d] ||= []).push(v);
+  });
+  const today = nowKey.slice(0, 10);
+  const days = Object.keys(byDay).filter(d => d >= today && byDay[d].length >= 12).slice(0, 4);
+  $('#airDaily').innerHTML = days.map((d, k) => {
+    const v = byDay[d], mean = sum(v) / v.length, aqi = pm25ToThaiAqi(mean), l = thaiLevel(aqi);
+    return `<div class="aq-day" style="--c:${l.color}">
+      <div class="d-n">${k === 0 ? 'วันนี้' : k === 1 ? 'พรุ่งนี้' : dayLabel(d)}</div>
+      <div class="d-v">${fmt(mean, 1)} <small>µg/m³</small></div>
+      <div class="d-l"><span class="badge" style="background:${l.color};color:${l.text}">AQI ${aqi} · ${l.name}</span></div>
+      <div class="d-r">ช่วง ${fmt(Math.min(...v), 0)}–${fmt(Math.max(...v), 0)} µg/m³</div>
+    </div>`;
+  }).join('');
+  $('#airSkill').innerHTML = `<div class="skill">
+    <b>🎯 ทดสอบความแม่นยำย้อนหลัง 48 ชม.</b> (ข้อมูลที่แบบจำลองไม่เคยเห็น) — ค่าคลาดเคลื่อนเฉลี่ย (MAE, µg/m³):
+    <table>${Object.keys(skill).map(k => `<tr class="${k === best ? 'best' : ''}"><td>${k === best ? '✅ ' : ''}${METHOD_NAMES[k]}</td><td style="text-align:right">${fmt(skill[k], 2)}</td></tr>`).join('')}</table>
+    <div class="muted" style="margin-top:4px">ระบบเลือกวิธีที่แม่นยำที่สุดของสถานีนี้โดยอัตโนมัติ · ฝึกด้วยข้อมูลจริง ${M.train.length} ชั่วโมง</div>
+  </div>`;
+
+  // ---------- บทวิเคราะห์ ----------
+  const peak = future.slice(0, 24).reduce((a, b) => (b.pred > a.pred ? b : a), future[0]);
+  const lastObs = [...rows].reverse().find(r => r.key <= nowKey && r.obs != null);
+  const pct = c => (Math.exp(c) - 1) * 100;
+  const drivers = Object.entries(contrib).sort((a, b) => b[1] - a[1]);
+  // ระบุทิศทางของตัวแปรเทียบกับค่าเฉลี่ย 14 วัน เช่น "ฝนสะสม 6 ชม. น้อยกว่าปกติ"
+  const label = g => {
+    const f = AIR_FEATURES.find(x => x.group === g);
+    if (!f.hi || Math.abs(zAvg[g]) < 0.15) return f.label;
+    return `${f.label} ${zAvg[g] > 0 ? f.hi : f.lo}`;
+  };
+  const up = drivers.filter(([, c]) => pct(c) >= 5).slice(0, 2), down = drivers.filter(([, c]) => pct(c) <= -5).reverse().slice(0, 2);
+  const pl = thaiLevel(pm25ToThaiAqi(peak.pred));
+  $('#airInsight').innerHTML = `<ul>
+    <li>ค่าตรวจวัดล่าสุด <b>${fmt(lastObs?.obs, 1)} µg/m³</b> (${lastObs?.t.slice(11)} น.) · คาดว่าใน 24 ชม. ข้างหน้า PM2.5 สูงสุด <b style="color:${pl.color === '#FFFF00' ? '#a16207' : pl.color}">${fmt(peak.pred, 1)} µg/m³</b> ช่วง ${dayLabel(peak.t)} ${peak.t.slice(11)} น.</li>
+    ${up.length ? `<li>🔺 ปัจจัยที่ทำให้ฝุ่นสะสมเพิ่ม: ${up.map(([g, c]) => `<b>${label(g)}</b> (+${fmt(pct(c))}%)`).join(', ')}</li>` : ''}
+    ${down.length ? `<li>🔻 ปัจจัยที่ช่วยลดฝุ่น: ${down.map(([g, c]) => `<b>${label(g)}</b> (${fmt(pct(c))}%)`).join(', ')}</li>` : ''}
+  </ul>`;
+
+  // ---------- กราฟรายชั่วโมง ----------
+  const all = [...pastRows, ...future];
+  const nowIdx = pastRows.length - 1;
+  const lvlLine = (v, name, color) => ({ label: name, data: all.map(() => v), borderColor: color, borderDash: [4, 4], borderWidth: 1, pointRadius: 0 });
+  makeChart('airForecastChart', {
+    type: 'line',
+    data: {
+      labels: all.map(r => {
+        const d = parseLocal(r.t);
+        return d.getHours() === 0 ? [fmtTime(d), fmtDay(d)] : fmtTime(d);
+      }),
+      datasets: [
+        { label: '_hi', data: all.map((r, i) => (i > nowIdx ? r.hi : null)), borderWidth: 0, pointRadius: 0, backgroundColor: 'rgba(168,85,247,.18)', fill: '+1' },
+        { label: '_lo', data: all.map((r, i) => (i > nowIdx ? r.lo : null)), borderWidth: 0, pointRadius: 0, fill: false },
+        { label: 'ค่าตรวจวัดจริง (Air4Thai)', data: all.map((r, i) => (i <= nowIdx ? r.obs ?? null : null)), borderColor: '#0f766e', backgroundColor: '#0f766e', pointRadius: 1.5, borderWidth: 2, spanGaps: false },
+        { label: 'แบบจำลอง CAMS', data: all.map(r => r.cams), borderColor: '#94a3b8', borderDash: [5, 4], pointRadius: 0, borderWidth: 1.5 },
+        { label: `ทำนาย (${METHOD_NAMES[best]})`, data: all.map((r, i) => (i >= nowIdx ? (i === nowIdx ? r.obs ?? r.cams : r.pred) : null)), borderColor: '#a855f7', pointRadius: 0, borderWidth: 3, tension: .3 },
+        lvlLine(37.5, 'เกณฑ์มาตรฐาน 37.5', '#FFA200'),
+        lvlLine(75, 'มีผลกระทบต่อสุขภาพ 75', '#F04646'),
+      ],
+    },
+    options: {
+      scales: {
+        x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 16 } },
+        y: { beginAtZero: true, suggestedMax: 40, title: { display: true, text: 'PM2.5 (µg/m³)' } },
+      },
+      plugins: {
+        nowLine: { index: nowIdx },
+        legend: { labels: { filter: it => !it.text.startsWith('_') } },
+        tooltip: { filter: it => !it.dataset.label.startsWith('_') && it.raw != null },
+      },
+    },
+  });
+  $('#airModelNote').innerHTML = `แถบสีม่วงอ่อน = ช่วงความเชื่อมั่นประมาณ 80% · แบบจำลองฝึกจากค่าตรวจวัดจริงของสถานี${s.name} ย้อนหลัง 14 วัน ` +
+    'ร่วมกับองค์ประกอบมลพิษจาก CAMS (PM2.5, CO, NO₂, AOD) และตัวแปรอุตุนิยมวิทยา (ความสูงชั้นผสมอากาศ, ลม, ความชื้น, ฝน, อุณหภูมิ)';
+
+  // ---------- กราฟปัจจัย ----------
+  const f = drivers.map(([g, c]) => ({ g, v: pct(c) })).sort((a, b) => b.v - a.v);
+  makeChart('airFactorChart', {
+    type: 'bar',
+    data: {
+      labels: f.map(x => label(x.g)),
+      datasets: [{ label: 'ผลต่อ PM2.5 (%)', data: f.map(x => x.v), backgroundColor: f.map(x => (x.v >= 0 ? '#ef4444' : '#22c55e')), borderRadius: 4 }],
+    },
+    options: {
+      indexAxis: 'y',
+      interaction: { mode: 'nearest', axis: 'y', intersect: false },
+      scales: { x: { title: { display: true, text: '% เทียบกับสภาพเฉลี่ย' } }, y: { ticks: { font: { size: 11 } } } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${c.raw >= 0 ? '+' : ''}${fmt(c.raw, 1)}%` } } },
+    },
+  });
+
+  renderAirComponents(M);
+}
+
+function renderAirComponents(M) {
+  const rows = [...M.rows.filter(r => r.key <= M.nowKey).slice(-48), ...M.future];
+  const nowIdx = M.rows.filter(r => r.key <= M.nowKey).slice(-48).length - 1;
+  // x = ตัวแปรที่แปลงแล้ว → แปลงกลับเพื่อแสดงค่าจริง
+  const comps = [
+    { name: 'PM2.5 (CAMS)', unit: 'µg/m³', color: '#a855f7', get: r => r.cams },
+    { name: 'CO', unit: 'µg/m³', color: '#f97316', get: r => Math.exp(r.x[1]) },
+    { name: 'NO₂', unit: 'µg/m³', color: '#ef4444', get: r => Math.exp(r.x[2]) - 1 },
+    { name: 'AOD', unit: '', color: '#eab308', get: r => r.x[3] },
+    { name: 'ความสูงชั้นผสมอากาศ', unit: 'ม.', color: '#0ea5e9', get: r => Math.exp(r.x[4]) - 10 },
+    { name: 'ความเร็วลม', unit: 'กม./ชม.', color: '#14b8a6', get: r => r.x[5] },
+  ];
+  $('#airComponents').innerHTML = comps.map((c, i) =>
+    `<div class="spark"><div class="s-h"><span>${c.name}</span><b style="color:${c.color}">${fmt(c.get(rows[nowIdx]), c.unit ? 0 : 2)} ${c.unit}</b></div><div class="s-c"><canvas id="airSpark${i}"></canvas></div></div>`).join('');
+  comps.forEach((c, i) => makeChart('airSpark' + i, {
+    type: 'line',
+    data: { labels: rows.map(r => `${dayLabel(r.t)} ${r.t.slice(11)}`), datasets: [{ data: rows.map(c.get), borderColor: c.color, backgroundColor: c.color + '22', fill: true, pointRadius: 0, borderWidth: 1.5, tension: .3 }] },
+    options: {
+      scales: { x: { display: false }, y: { display: false, beginAtZero: true } },
+      plugins: { legend: { display: false }, nowLine: { index: nowIdx, label: ' ' }, tooltip: { callbacks: { label: t => `${fmt(t.raw, c.unit ? 1 : 2)} ${c.unit}` } } },
+    },
+  }));
+}
+
+/* ---------- เทียบกับ WAQI ---------- */
+
+async function renderWaqiCompare(s) {
+  const box = $('#airWaqi');
+  box.innerHTML = '<h3>เทียบกับ WAQI (aqicn.org)</h3><div class="skeleton">กำลังโหลด…</div>';
+  try {
+    const d = await waqiFeed(`geo:${s.lat};${s.lon}`);
+    if (state.airStationId !== s.id) return;
+    const lvl = usLevel(+d.aqi || 0);
+    const fc = d.forecast?.daily?.pm25 || [];
+    box.innerHTML = `<h3>เทียบกับ WAQI (aqicn.org) <span class="muted">— สถานีใกล้เคียง, มาตรฐาน US AQI</span></h3>
+      <div class="waqi-grid">
+        <div>
+          <div class="ring-wrap" style="display:flex;gap:14px;align-items:center">
+            ${aqiRing(+d.aqi || null, lvl, 300)}
+            <div>
+              <div class="st-name"><b>${d.city?.name || ''}</b></div>
+              <span class="badge" style="background:${lvl.color};color:${lvl.text}">${lvl.name}</span>
+              <div class="muted" style="font-size:.82rem">มลพิษหลัก ${(d.dominentpol || '').toUpperCase()} · ${d.time?.s || ''}<br>ห่างจากสถานีที่เลือก ${fmt(haversine(s.lat, s.lon, d.city.geo[0], d.city.geo[1]), 1)} กม.</div>
+            </div>
+          </div>
+          <div class="iaqi">${Object.entries(d.iaqi || {}).filter(([k]) => IAQI_NAMES[k]).map(([k, v]) => `<span>${IAQI_NAMES[k]} <b>${fmt(v.v, 1)}</b></span>`).join('')}</div>
+          <p class="hint">หมายเหตุ: US AQI ใช้เกณฑ์เข้มกว่า AQI ไทย ค่าตัวเลขจึงมักสูงกว่า · ${(d.attributions || []).map(a => a.name).join(' · ')}</p>
+        </div>
+        <div>
+          <b>พยากรณ์ PM2.5 รายวันของ WAQI (US AQI)</b>
+          <div class="chart-box" style="height:200px"><canvas id="waqiChart"></canvas></div>
+        </div>
+      </div>`;
+    if (fc.length) {
+      makeChart('waqiChart', {
+        type: 'bar',
+        data: {
+          labels: fc.map(x => dayLabel(x.day)),
+          datasets: [
+            { label: 'เฉลี่ย', data: fc.map(x => x.avg), backgroundColor: fc.map(x => usLevel(x.avg).color), borderRadius: 4 },
+            { type: 'line', label: 'สูงสุด', data: fc.map(x => x.max), borderColor: '#94a3b8', borderDash: [4, 3], pointRadius: 2 },
+          ],
+        },
+        options: { scales: { y: { beginAtZero: true, title: { display: true, text: 'US AQI' } } }, plugins: { nowLine: { index: fc.findIndex(x => x.day === hourKey(nowAt(BKK_OFFSET)).slice(0, 10)), label: 'วันนี้' } } },
+      });
+    }
+  } catch (e) {
+    box.innerHTML = `<h3>เทียบกับ WAQI</h3><p class="muted">โหลดข้อมูล WAQI ไม่สำเร็จ: ${e.message}</p>`;
+  }
 }
 
 /* ------------------------------------------------------------------ */
