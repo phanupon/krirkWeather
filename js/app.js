@@ -304,6 +304,7 @@ function ensureTab(tab) {
   if (tab === 'flood' && state.weather) { state.loaded.flood = true; loadFlood(); }
   if (tab === 'water') { state.loaded.water = true; loadWater(); }
   if (tab === 'air') { state.loaded.air = true; loadAir(); }
+  if (tab === 'fire') { state.loaded.fire = true; loadFire(); }
   if (tab === 'quake') { state.loaded.quake = true; loadQuakes(); }
   if (tab === 'tide') { state.loaded.tide = true; loadTide(); }
 }
@@ -1753,6 +1754,626 @@ async function renderWaqiCompare(s) {
     }
   } catch (e) {
     box.innerHTML = `<h3>เทียบกับ WAQI</h3><p class="muted">โหลดข้อมูล WAQI ไม่สำเร็จ: ${e.message}</p>`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* ไฟป่า / จุดความร้อน                                                  */
+/*   GISTDA (สทอภ.) : จุดความร้อน VIIRS ในไทย พร้อมจังหวัด/อำเภอ/ตำบล/      */
+/*                    ประเภทการใช้ที่ดิน + พื้นที่เผาไหม้ (burn scar)         */
+/*   NASA FIRMS     : จุดความร้อนประเทศเพื่อนบ้าน + ข้อมูลย้อนหลังตั้งแต่ปี 2000 */
+/* ------------------------------------------------------------------ */
+
+// คีย์ของผู้ใช้ (ใช้ฝั่งเบราว์เซอร์ จึงมองเห็นได้ใน source ของหน้าเว็บ)
+const FIRMS_KEY = '32b4fb7e858c7b910f8810ae7b5b193e';
+const GISTDA_KEY = 'iJlWI41aCyhpJYQlJGBLz99HXLVNjfjc3O2f7svqOuyR8vu9FqceSossTbiKuzjx';
+const GISTDA_BASE = 'https://api-gateway.gistda.or.th/api/2.0/resources/features/';
+const FIRMS_BASE = 'https://firms.modaps.eosdis.nasa.gov/api/';
+const FIRE_REGION = [92, 5, 110, 24.5]; // west,south,east,north — ไทยและประเทศเพื่อนบ้าน
+const GISTDA_MAX = 6000; // ข้อมูล GISTDA ~1.6 KB/จุด และไม่บีบอัด จึงจำกัดจำนวนที่ดาวน์โหลด
+
+const COUNTRIES = {
+  764: { code: 'TH', name: 'ไทย', color: '#f97316' },
+  104: { code: 'MM', name: 'เมียนมา', color: '#dc2626' },
+  418: { code: 'LA', name: 'ลาว', color: '#db2777' },
+  116: { code: 'KH', name: 'กัมพูชา', color: '#7c3aed' },
+  704: { code: 'VN', name: 'เวียดนาม', color: '#0891b2' },
+  458: { code: 'MY', name: 'มาเลเซีย', color: '#64748b' },
+};
+const OTHER_COUNTRY = { code: 'XX', name: 'อื่น ๆ (จีนตอนใต้/ทะเล)', color: '#94a3b8' };
+const countryByCode = c => Object.values(COUNTRIES).find(x => x.code === c) || OTHER_COUNTRY;
+
+const LANDUSE = {
+  'ป่าอนุรักษ์': '#166534',
+  'ป่าสงวนแห่งชาติ': '#65a30d',
+  'เขต สปก.': '#ca8a04',
+  'พื้นที่เกษตร': '#f97316',
+  'ชุมชนและอื่น ๆ': '#a855f7',
+  'พื้นที่ริมทางหลวง': '#64748b',
+};
+const luColor = lu => LANDUSE[lu] || '#94a3b8';
+const isForest = lu => lu === 'ป่าอนุรักษ์' || lu === 'ป่าสงวนแห่งชาติ';
+const frpColor = f => (f >= 50 ? '#7f1d1d' : f >= 15 ? '#ef4444' : f >= 5 ? '#fb923c' : '#fde047');
+const ageColor = h => (h < 6 ? '#dc2626' : h < 24 ? '#f97316' : h < 72 ? '#facc15' : '#a3a3a3');
+
+const TH_PROVINCES = ['กรุงเทพมหานคร', 'กระบี่', 'กาญจนบุรี', 'กาฬสินธุ์', 'กำแพงเพชร', 'ขอนแก่น', 'จันทบุรี', 'ฉะเชิงเทรา', 'ชลบุรี', 'ชัยนาท',
+  'ชัยภูมิ', 'ชุมพร', 'เชียงราย', 'เชียงใหม่', 'ตรัง', 'ตราด', 'ตาก', 'นครนายก', 'นครปฐม', 'นครพนม', 'นครราชสีมา', 'นครศรีธรรมราช',
+  'นครสวรรค์', 'นนทบุรี', 'นราธิวาส', 'น่าน', 'บึงกาฬ', 'บุรีรัมย์', 'ปทุมธานี', 'ประจวบคีรีขันธ์', 'ปราจีนบุรี', 'ปัตตานี',
+  'พระนครศรีอยุธยา', 'พะเยา', 'พังงา', 'พัทลุง', 'พิจิตร', 'พิษณุโลก', 'เพชรบุรี', 'เพชรบูรณ์', 'แพร่', 'ภูเก็ต', 'มหาสารคาม',
+  'มุกดาหาร', 'แม่ฮ่องสอน', 'ยโสธร', 'ยะลา', 'ร้อยเอ็ด', 'ระนอง', 'ระยอง', 'ราชบุรี', 'ลพบุรี', 'ลำปาง', 'ลำพูน', 'เลย', 'ศรีสะเกษ',
+  'สกลนคร', 'สงขลา', 'สตูล', 'สมุทรปราการ', 'สมุทรสงคราม', 'สมุทรสาคร', 'สระแก้ว', 'สระบุรี', 'สิงห์บุรี', 'สุโขทัย', 'สุพรรณบุรี',
+  'สุราษฎร์ธานี', 'สุรินทร์', 'หนองคาย', 'หนองบัวลำภู', 'อ่างทอง', 'อำนาจเจริญ', 'อุดรธานี', 'อุตรดิตถ์', 'อุทัยธานี', 'อุบลราชธานี'];
+
+/** ทิศทาง (องศา) จากจุด 1 ไปจุด 2 */
+function bearing(lat1, lon1, lat2, lon2) {
+  const r = Math.PI / 180;
+  const y = Math.sin((lon2 - lon1) * r) * Math.cos(lat2 * r);
+  const x = Math.cos(lat1 * r) * Math.sin(lat2 * r) - Math.sin(lat1 * r) * Math.cos(lat2 * r) * Math.cos((lon2 - lon1) * r);
+  return (Math.atan2(y, x) / r + 360) % 360;
+}
+/** จุดปลายจากจุดตั้งต้น ทิศ brg ระยะ km (ใช้วาดเซกเตอร์ต้นลม) */
+function destPoint(lat, lon, brg, km) {
+  const r = Math.PI / 180, d = km / 6371, b = brg * r, la = lat * r, lo = lon * r;
+  const la2 = Math.asin(Math.sin(la) * Math.cos(d) + Math.cos(la) * Math.sin(d) * Math.cos(b));
+  const lo2 = lo + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(la), Math.cos(d) - Math.sin(la) * Math.sin(la2));
+  return [la2 / r, lo2 / r];
+}
+const angDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+const TH_DIRS = ['เหนือ', 'ตะวันออกเฉียงเหนือ', 'ตะวันออก', 'ตะวันออกเฉียงใต้', 'ใต้', 'ตะวันตกเฉียงใต้', 'ตะวันตก', 'ตะวันตกเฉียงเหนือ'];
+const dirName = deg => TH_DIRS[Math.round(deg / 45) % 8];
+
+/* ---------- เขตแดนประเทศ (Natural Earth 1:50m) ---------- */
+
+function loadCountries() {
+  if (state.countriesPromise) return state.countriesPromise;
+  state.countriesPromise = getJSON('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json', 30e3).then(topo => {
+    const geoms = topo.objects.countries.geometries.filter(g => COUNTRIES[+g.id]);
+    return geoms.map(g => {
+      const f = topojson.feature(topo, g);
+      const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+      let [w, s, e, n] = [180, 90, -180, -90];
+      polys.forEach(p => p[0].forEach(([x, y]) => { w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y); }));
+      return { ...COUNTRIES[+g.id], feature: f, polys, bbox: [w, s, e, n] };
+    });
+  });
+  state.countriesPromise.catch(() => { state.countriesPromise = null; });
+  return state.countriesPromise;
+}
+
+function inRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function countryOf(countries, lat, lon) {
+  for (const c of countries) {
+    const [w, s, e, n] = c.bbox;
+    if (lon < w || lon > e || lat < s || lat > n) continue;
+    if (c.polys.some(p => inRing(lon, lat, p[0]) && !p.slice(1).some(h => inRing(lon, lat, h)))) return c.code;
+  }
+  return 'XX';
+}
+
+/* ---------- โหลดข้อมูล ---------- */
+
+/** จุดความร้อนในไทยจาก GISTDA (แบ่งหน้าละ 1,000 ดาวน์โหลดพร้อมกัน) */
+async function loadGistdaHotspots(period) {
+  const url = off => `${GISTDA_BASE}viirs/${period}?limit=1000&offset=${off}&ct_en=Thailand&api_key=${GISTDA_KEY}`;
+  const first = await getJSON(url(0), 60e3);
+  const total = first.numberMatched ?? first.features.length;
+  const pages = [];
+  for (let off = 1000; off < Math.min(total, GISTDA_MAX); off += 1000) pages.push(getJSON(url(off), 60e3));
+  const rest = await Promise.all(pages);
+  const feats = [first, ...rest].flatMap(p => p.features || []);
+  const now = nowAt(BKK_OFFSET);
+  const list = feats.map(f => {
+    const p = f.properties, tt = String(p.th_time || '0000').padStart(4, '0');
+    const t = parseLocal(`${(p.th_date || p.acq_date).slice(0, 10)}T${tt.slice(0, 2)}:${tt.slice(2)}`);
+    return {
+      lat: p.latitude, lon: p.longitude, t, ageH: (now - t) / 3600e3, country: 'TH', src: 'GISTDA',
+      sat: { N: 'Suomi-NPP', N20: 'NOAA-20', N21: 'NOAA-21' }[p.satellite] || p.satellite, conf: p.confidence, frp: p.frp ?? 0,
+      pv: p.pv_tn, ap: p.ap_tn, tb: p.tb_tn, village: p.village, lu: p.lu_name || 'ไม่ระบุ', crop: p.lu_hp_name,
+      vDist: p.v_dist, vDir: p.v_direct,
+    };
+  });
+  return { list, total };
+}
+
+/** แปลง CSV ของ FIRMS เป็นรายการจุด (เวลา UTC → เวลาไทย) */
+function parseFirmsCsv(text, countries, now) {
+  const lines = text.trim().split('\n');
+  const head = lines.shift()?.split(',') || [];
+  if (!head.includes('latitude')) throw new Error(text.slice(0, 120));
+  const ix = k => head.indexOf(k);
+  const iLat = ix('latitude'), iLon = ix('longitude'), iD = ix('acq_date'), iT = ix('acq_time'), iC = ix('confidence'),
+    iF = ix('frp'), iS = ix('satellite'), iI = ix('instrument');
+  return lines.map(l => {
+    const c = l.split(',');
+    const tt = c[iT].padStart(4, '0');
+    const utc = parseLocal(`${c[iD]}T${tt.slice(0, 2)}:${tt.slice(2)}`);
+    const t = new Date(utc.getTime() + BKK_OFFSET * 1000);
+    const lat = +c[iLat], lon = +c[iLon];
+    const conf = c[iC];
+    return {
+      lat, lon, t, ageH: (now - t) / 3600e3, country: countryOf(countries, lat, lon), src: 'FIRMS',
+      sat: `${c[iI]} ${c[iS]}`, frp: +c[iF] || 0,
+      conf: { l: 'low', n: 'nominal', h: 'high' }[conf] || (+conf >= 80 ? 'high' : +conf >= 30 ? 'nominal' : 'low'),
+    };
+  });
+}
+
+/** ชื่อชุดข้อมูล FIRMS: NRT (ล่าสุด ~3 เดือน) หรือ SP (ข้อมูลมาตรฐานย้อนหลัง) ตามวันที่ */
+async function firmsSource(sat, startDate) {
+  if (!state.firmsAvail) {
+    const csv = await fetch(`${FIRMS_BASE}data_availability/csv/${FIRMS_KEY}/all`).then(r => r.text());
+    state.firmsAvail = Object.fromEntries(csv.trim().split('\n').slice(1).map(l => { const [id, a, b] = l.split(','); return [id, [a, b]]; }));
+  }
+  const ok = id => state.firmsAvail[id] && (!startDate || (startDate >= state.firmsAvail[id][0] && startDate <= state.firmsAvail[id][1]));
+  for (const id of [`${sat}_NRT`, `${sat}_SP`, 'VIIRS_SNPP_SP', 'MODIS_SP']) if (ok(id)) return id;
+  throw new Error(`ไม่มีข้อมูล ${sat} สำหรับวันที่ ${startDate}`);
+}
+
+/** FIRMS area API จำกัด 1–5 วันต่อคำขอ → แบ่งช่วงเป็นก้อนละ 5 วัน (วันที่ตาม UTC) แล้วโหลดพร้อมกัน */
+async function loadFirms(sat, days, startDate, countries) {
+  const now = nowAt(BKK_OFFSET);
+  const chunks = [];
+  if (!startDate && days <= 5) chunks.push({ days, date: null });
+  else {
+    const start = startDate ? new Date(startDate + 'T00:00:00Z') : new Date(Date.now() - (days - 1) * 86400e3);
+    for (let off = 0; off < days; off += 5) {
+      const d = new Date(start.getTime() + off * 86400e3);
+      chunks.push({ days: Math.min(5, days - off), date: d.toISOString().slice(0, 10) });
+    }
+  }
+  const results = await Promise.all(chunks.map(async c => {
+    const src = await firmsSource(sat, c.date);
+    const url = `${FIRMS_BASE}area/csv/${FIRMS_KEY}/${src}/${FIRE_REGION.join(',')}/${c.days}${c.date ? '/' + c.date : ''}`;
+    const text = await fetch(url, { signal: AbortSignal.timeout(90e3) }).then(r => r.text());
+    return { list: parseFirmsCsv(text, countries, now), src };
+  }));
+  return { list: results.flatMap(r => r.list), src: [...new Set(results.map(r => r.src))].join(' + ') };
+}
+
+/* ---------- แท็บหลัก ---------- */
+
+function initFireControls() {
+  if (state.fireControlsBound) return;
+  state.fireControlsBound = true;
+  const now = nowAt(BKK_OFFSET);
+  const d = new Date(now); d.setDate(d.getDate() - 2);
+  $('#fireDate').value = ymdOf(d);
+  $('#fireDate').max = ymdOf(now);
+  $('#fireDate').min = '2000-11-01';
+  $('#fireMode').addEventListener('click', e => {
+    const b = e.target.closest('button[data-mode]');
+    if (!b) return;
+    $$('#fireMode button').forEach(x => x.classList.toggle('active', x === b));
+    const archive = b.dataset.mode === 'archive';
+    $('#firePeriodWrap').hidden = archive;
+    $('#fireDateWrap').hidden = !archive;
+    $('#fireColor').value = archive ? 'country' : 'lu';
+    loadFire();
+  });
+  $('#fireReload').addEventListener('click', loadFire);
+  ['#firePeriod', '#fireSat', '#fireNeighbors'].forEach(s => $(s).addEventListener('change', loadFire));
+  $('#fireColor').addEventListener('change', () => state.fire && renderFireMap(state.fire));
+  $('#fireTableFilter').addEventListener('change', () => state.fire && renderFireTable(state.fire));
+  $('#fireScarBtn').addEventListener('click', loadBurnScar);
+  $('#fireScarProv').innerHTML = TH_PROVINCES.map(p => `<option>${p}</option>`).join('');
+}
+
+async function loadFire() {
+  initFireControls();
+  const archive = $('#fireMode .active').dataset.mode === 'archive';
+  const sat = $('#fireSat').value, neighbors = $('#fireNeighbors').checked;
+  const token = (state.fireToken = {});
+  setStatus('fireStatus', archive ? 'กำลังดึงข้อมูลย้อนหลังจาก NASA FIRMS…' : 'กำลังดึงข้อมูลจุดความร้อนจาก GISTDA และ NASA FIRMS…', 'loading');
+  try {
+    const countries = await loadCountries();
+    let th = [], others = [], total = 0, note = [];
+    if (archive) {
+      const days = +$('#fireDays').value, start = $('#fireDate').value;
+      const f = await loadFirms(sat, days, start, countries);
+      th = f.list.filter(p => p.country === 'TH');
+      others = neighbors ? f.list.filter(p => p.country !== 'TH') : [];
+      total = th.length;
+      const end = new Date(parseLocal(start)); end.setDate(end.getDate() + days - 1);
+      note.push(`NASA FIRMS ${f.src} · ${dayLabel(start)} – ${fmtDay(end)}`);
+      state.fireRange = { from: start, days };
+    } else {
+      const period = $('#firePeriod').value;
+      const days = { '1day': 1, '3days': 3, '7days': 7, '30days': 30 }[period];
+      const [g, f] = await Promise.allSettled([
+        loadGistdaHotspots(period),
+        neighbors ? loadFirms(sat, days, null, countries) : Promise.resolve({ list: [] }),
+      ]);
+      if (g.status === 'fulfilled') {
+        th = g.value.list; total = g.value.total;
+        note.push(`GISTDA VIIRS ${days} วัน`);
+        if (total > th.length) note.push(`⚠️ แผนที่แสดง ${fmt(th.length)} จาก ${fmt(total)} จุด (เลือกช่วงเวลาสั้นลงเพื่อดูครบ)`);
+      } else {
+        // GISTDA ล้มเหลว → ใช้จุดในไทยจาก FIRMS แทน
+        note.push(`⚠️ GISTDA ไม่ตอบสนอง (${g.reason?.message}) ใช้ข้อมูลในไทยจาก NASA FIRMS แทน`);
+      }
+      if (f.status === 'fulfilled') {
+        if (g.status !== 'fulfilled') { th = f.value.list.filter(p => p.country === 'TH'); total = th.length; }
+        others = f.value.list.filter(p => p.country !== 'TH');
+        if (neighbors) note.push(`ประเทศเพื่อนบ้าน: NASA FIRMS ${f.value.src} ${days} วัน`);
+      } else note.push(`⚠️ NASA FIRMS ไม่ตอบสนอง (${f.reason?.message})`);
+      if (g.status !== 'fulfilled' && f.status !== 'fulfilled') throw new Error('ไม่สามารถเชื่อมต่อทั้ง GISTDA และ NASA FIRMS');
+      const now = nowAt(BKK_OFFSET), from = new Date(now); from.setDate(from.getDate() - days + 1);
+      state.fireRange = { from: ymdOf(from), days };
+    }
+    if (token !== state.fireToken) return;
+    state.fire = { th, others, total, archive, countries, note };
+    setStatus('fireStatus', note.join(' · '), note.some(n => n.startsWith('⚠️')) ? '' : 'loading');
+    renderFire(state.fire);
+  } catch (e) {
+    if (token !== state.fireToken) return;
+    setStatus('fireStatus', `โหลดข้อมูลจุดความร้อนไม่สำเร็จ: ${e.message}`, 'error');
+  }
+}
+
+function renderFire(F) {
+  renderFireTiles(F);
+  renderFireMap(F);
+  renderFireNear(F);
+  renderFireCharts(F);
+  renderFireTable(F, true);
+  renderFireWeather();
+  // จังหวัดเริ่มต้นสำหรับ burn scar = จังหวัดของตำแหน่งหลัก
+  provinceOfLoc().then(p => { if (p && TH_PROVINCES.includes(p) && !state.scarProvTouched) $('#fireScarProv').value = p; });
+}
+
+async function provinceOfLoc() {
+  const key = `${state.loc.lat},${state.loc.lon}`;
+  if (state.locProvince?.key === key) return state.locProvince.name;
+  try {
+    const j = await getJSON(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${state.loc.lat}&longitude=${state.loc.lon}&localityLanguage=th`);
+    const name = (j.principalSubdivision || '').replace(/^จังหวัด/, '').trim();
+    state.locProvince = { key, name };
+    return name;
+  } catch { return null; }
+}
+
+function renderFireTiles(F) {
+  const { th, others, total, archive } = F;
+  const forest = th.filter(p => isForest(p.lu)).length;
+  const byProv = {};
+  th.forEach(p => { if (p.pv) byProv[p.pv] = (byProv[p.pv] || 0) + 1; });
+  const topProv = Object.entries(byProv).sort((a, b) => b[1] - a[1])[0];
+  const byCountry = {};
+  others.forEach(p => { byCountry[p.country] = (byCountry[p.country] || 0) + 1; });
+  const topC = Object.entries(byCountry).filter(([c]) => c !== 'XX').sort((a, b) => b[1] - a[1])[0];
+  const maxF = [...th, ...others].reduce((a, b) => (b.frp > (a?.frp ?? -1) ? b : a), null);
+  const last24 = th.filter(p => p.ageH <= 24).length;
+  const tile = (label, value, sub, cls = '') => `<div class="tile ${cls}"><div class="t-label">${label}</div><div class="t-value">${value}</div><div class="t-sub">${sub}</div></div>`;
+  $('#fireTiles').innerHTML =
+    tile('🔥 จุดความร้อนในประเทศไทย', fmt(total), archive ? `${state.fireRange.days} วัน (NASA FIRMS)` : `ใน 24 ชม. ล่าสุด ${fmt(last24)} จุด`, 'fire-tile-hot') +
+    (archive ? '' : tile('🌲 ในพื้นที่ป่า', fmt(forest), th.length ? `${fmt(forest / th.length * 100, 1)}% (ป่าอนุรักษ์ + ป่าสงวนแห่งชาติ)` : '–')) +
+    (archive ? '' : tile('📍 จังหวัดที่พบมากที่สุด', topProv ? topProv[0] : '–', topProv ? `${fmt(topProv[1])} จุด` : 'ไม่พบจุดความร้อน')) +
+    tile('🌏 ประเทศเพื่อนบ้าน', fmt(others.filter(p => p.country !== 'XX').length), topC ? `มากสุด: ${countryByCode(topC[0]).name} ${fmt(topC[1])} จุด` : 'ไม่ได้แสดง/ไม่พบ') +
+    tile('💥 ไฟรุนแรงที่สุด (FRP)', maxF ? `${fmt(maxF.frp, 1)} MW` : '–', maxF ? (maxF.pv ? `จ.${maxF.pv} · ${maxF.lu}` : countryByCode(maxF.country).name) : '');
+}
+
+function fireColorOf(p, mode) {
+  if (mode === 'frp') return frpColor(p.frp);
+  if (mode === 'age') return ageColor(p.ageH);
+  if (mode === 'country') return countryByCode(p.country).color;
+  return p.src === 'GISTDA' ? luColor(p.lu) : countryByCode(p.country).color;
+}
+
+function firePopup(p) {
+  const place = p.pv ? `บ้าน${p.village || '–'} ต.${p.tb} อ.${p.ap} จ.${p.pv}` : countryByCode(p.country).name;
+  return `<b>🔥 ${place}</b><br>${p.t.toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })} น.` +
+    `${p.lu ? `<br>พื้นที่: <b style="color:${luColor(p.lu)}">${p.lu}</b>${p.crop ? ` · ${p.crop}` : ''}` : ''}` +
+    `<br>FRP ${fmt(p.frp, 1)} MW · ความเชื่อมั่น ${p.conf} · ${p.sat}` +
+    `${p.vDist ? `<br><small>ห่างหมู่บ้าน ${fmt(p.vDist, 2)} กม. ทิศ ${p.vDir}</small>` : ''}` +
+    `<br><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank" rel="noopener">เปิดใน Google Maps</a> · <small>${p.src}</small>`;
+}
+
+function renderFireMap(F) {
+  if (!state.maps.fire) {
+    const map = L.map('fireMap', { preferCanvas: true, zoomSnap: 0.25 }).fitBounds([[5.6, 96], [21, 107]]);
+    const streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '© OpenStreetMap' }).addTo(map);
+    const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, attribution: 'Imagery © Esri' });
+    state.fireLayers = { border: L.layerGroup().addTo(map), others: L.layerGroup().addTo(map), th: L.layerGroup().addTo(map), scar: L.layerGroup().addTo(map), me: L.layerGroup().addTo(map) };
+    L.control.layers({ 'แผนที่ถนน': streets, 'ภาพถ่ายดาวเทียม': sat }, {
+      '🔥 จุดความร้อนในไทย': state.fireLayers.th,
+      '🌏 ประเทศเพื่อนบ้าน': state.fireLayers.others,
+      '🟫 พื้นที่เผาไหม้ (burn scar)': state.fireLayers.scar,
+      '🧭 ทิศลม/ต้นลม': state.fireLayers.me,
+    }, { collapsed: true }).addTo(map);
+    state.maps.fire = map;
+    // เส้นเขตแดนประเทศไทย
+    F.countries.filter(c => c.code === 'TH').forEach(c =>
+      L.geoJSON(c.feature, { style: { color: '#ea580c', weight: 1.5, fill: false, dashArray: '4 3' }, interactive: false }).addTo(state.fireLayers.border));
+  }
+  const mode = $('#fireColor').value;
+  const Ly = state.fireLayers;
+  Ly.th.clearLayers(); Ly.others.clearLayers();
+  const draw = (p, layer) => L.circleMarker([p.lat, p.lon], {
+    radius: 3 + Math.sqrt(Math.min(p.frp, 150)) * 0.55, weight: 0.6, color: '#fff',
+    fillColor: fireColorOf(p, mode), fillOpacity: p.ageH > 72 && mode !== 'age' ? 0.6 : 0.9,
+  }).bindPopup(() => firePopup(p)).addTo(layer);
+  [...F.others].sort((a, b) => a.frp - b.frp).forEach(p => draw(p, Ly.others));
+  [...F.th].sort((a, b) => a.frp - b.frp).forEach(p => draw(p, Ly.th));
+
+  const dot = (c, t) => `<i style="background:${c}"></i>${t}`;
+  let legend = '';
+  if (mode === 'lu') legend = `<span><b>ประเภทพื้นที่ (ไทย):</b>${Object.entries(LANDUSE).map(([k, c]) => dot(c, k)).join('')}</span><span><b>ต่างประเทศ:</b>${Object.values(COUNTRIES).filter(c => c.code !== 'TH').map(c => dot(c.color, c.name)).join('')}</span>`;
+  if (mode === 'frp') legend = `<span><b>FRP (MW):</b>${dot('#fde047', '< 5')}${dot('#fb923c', '5–15')}${dot('#ef4444', '15–50')}${dot('#7f1d1d', '≥ 50')}</span>`;
+  if (mode === 'age') legend = `<span><b>ตรวจพบเมื่อ:</b>${dot('#dc2626', '< 6 ชม.')}${dot('#f97316', '6–24 ชม.')}${dot('#facc15', '1–3 วัน')}${dot('#a3a3a3', '> 3 วัน')}</span>`;
+  if (mode === 'country') legend = `<span><b>ประเทศ:</b>${Object.values(COUNTRIES).map(c => dot(c.color, c.name)).join('')}${dot(OTHER_COUNTRY.color, OTHER_COUNTRY.name)}</span>`;
+  $('#fireLegend').innerHTML = legend + '<span>ขนาดจุดตามความรุนแรง (FRP) · เส้นประสีส้ม = เขตแดนประเทศไทย · ลูกศรสีฟ้า = ทิศลมขณะนี้, พื้นที่สีฟ้า = ต้นลม 300 กม.</span>';
+}
+
+/** ความเสี่ยงต่อตำแหน่งหลัก: จุดใกล้ + ควันไฟที่ลมพัดพามา */
+function renderFireNear(F) {
+  const { lat, lon, name } = state.loc;
+  $('#fireNearLoc').textContent = `(${name})`;
+  const all = [...F.th, ...F.others].map(p => ({ ...p, dist: haversine(lat, lon, p.lat, p.lon), brg: bearing(lat, lon, p.lat, p.lon) }));
+  const within = km => all.filter(p => p.dist <= km);
+  const nearest = all.reduce((a, b) => (b.dist < (a?.dist ?? Infinity) ? b : a), null);
+  const n25 = within(25).length, n50 = within(50).length, n100 = within(100).length;
+
+  // ลมขณะนี้ (wind_direction = ทิศที่ลมพัดมา)
+  const w = state.weather?.current;
+  const windFrom = w?.wind_direction_10m, windSpd = w?.wind_speed_10m;
+  const upwind = windFrom == null ? [] : all.filter(p => p.dist <= 300 && angDiff(p.brg, windFrom) <= 45);
+  const up150 = upwind.filter(p => p.dist <= 150).length;
+  const smokeLvl = up150 >= 50 ? 3 : up150 >= 10 ? 2 : up150 >= 1 ? 1 : 0;
+  const nearLvl = n25 >= 10 ? 3 : n25 >= 1 ? 2 : n50 >= 1 ? 1 : 0;
+  const LV = [['ต่ำ', '#16a34a'], ['ปานกลาง', '#ca8a04'], ['สูง', '#ea580c'], ['สูงมาก', '#dc2626']];
+  const chip = (lv, sub) => `<div class="risk-chip" style="background:${LV[lv][1]}">${LV[lv][0]}<small>${sub}</small></div>`;
+
+  // เข็มทิศ: ทิศลม + จุดความร้อนรอบ ๆ (รัศมี 300 กม.)
+  const pts = all.filter(p => p.dist <= 300).slice(0, 400).map(p => {
+    const r = 6 + (p.dist / 300) * 40, a = (p.brg - 90) * Math.PI / 180;
+    return `<circle cx="${48 + r * Math.cos(a)}" cy="${48 + r * Math.sin(a)}" r="1.6" fill="#ef4444" opacity=".8"/>`;
+  }).join('');
+  const arrow = windFrom == null ? '' : (() => {
+    const a = (windFrom + 180 - 90) * Math.PI / 180; // ลมพัดไปทิศตรงข้ามกับทิศที่มา
+    const x1 = 48 - 30 * Math.cos(a), y1 = 48 - 30 * Math.sin(a), x2 = 48 + 30 * Math.cos(a), y2 = 48 + 30 * Math.sin(a);
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#0ea5e9" stroke-width="3" marker-end="url(#ah)"/>`;
+  })();
+  const compass = `<svg class="compass" viewBox="0 0 96 96">
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0ea5e9"/></marker></defs>
+    <circle cx="48" cy="48" r="46" fill="var(--surface-2)" stroke="var(--border)"/><circle cx="48" cy="48" r="25" fill="none" stroke="var(--border)" stroke-dasharray="2 3"/>
+    <text x="48" y="10" text-anchor="middle" font-size="9" fill="var(--muted)">N</text>${pts}${arrow}<circle cx="48" cy="48" r="3" fill="var(--text)"/></svg>`;
+
+  $('#fireNear').innerHTML = `
+    <div class="near-head">${compass}
+      <div>
+        <div>ลมขณะนี้: <b>${windFrom == null ? '–' : `จากทิศ${dirName(windFrom)} ${fmt(windSpd)} กม./ชม.`}</b></div>
+        <div class="muted" style="font-size:.85rem">จุดแดง = จุดความร้อนรัศมี 300 กม. · ลูกศร = ทิศที่ลมพัดไป</div>
+        <div style="font-size:.88rem;margin-top:4px">ใกล้ที่สุด: <b>${nearest ? `${fmt(nearest.dist, 1)} กม.` : '–'}</b>${nearest ? ` ทิศ${dirName(nearest.brg)} · ${nearest.pv ? `จ.${nearest.pv} (${nearest.lu})` : countryByCode(nearest.country).name}` : ''}</div>
+      </div>
+    </div>
+    <div class="risk-row">${chip(nearLvl, 'ไฟใกล้ตัว')}<div>รัศมี 25 กม.: <b>${n25}</b> จุด · 50 กม.: <b>${n50}</b> จุด · 100 กม.: <b>${n100}</b> จุด
+      <div class="muted" style="font-size:.82rem">${nearLvl >= 2 ? 'มีจุดความร้อนใกล้พื้นที่ ควรเฝ้าระวังไฟลุกลามและหลีกเลี่ยงการเผาในที่โล่ง' : 'ไม่พบจุดความร้อนในระยะใกล้'}</div></div></div>
+    <div class="risk-row">${chip(smokeLvl, 'ควันพัดเข้า')}<div>จุดความร้อนอยู่<b>ต้นลม</b> (±45° จากทิศที่ลมพัดมา): ภายใน 150 กม. <b>${up150}</b> จุด · 300 กม. <b>${upwind.length}</b> จุด
+      <div class="muted" style="font-size:.82rem">${windFrom == null ? 'ไม่มีข้อมูลลม' : smokeLvl >= 2 ? '⚠️ ลมอาจพัดพาควันและฝุ่น PM2.5 เข้าสู่พื้นที่ ดูแท็บคุณภาพอากาศประกอบ' : 'โอกาสที่ควันไฟจะถูกพัดเข้าพื้นที่ต่ำ'}</div></div></div>`;
+
+  // ลูกศรลมและเซกเตอร์ต้นลมบนแผนที่
+  const me = state.fireLayers.me;
+  me.clearLayers();
+  L.marker([lat, lon]).bindPopup(`<b>${name}</b>`).addTo(me);
+  if (windFrom != null) {
+    const sector = [[lat, lon]];
+    for (let a = windFrom - 45; a <= windFrom + 45; a += 5) sector.push(destPoint(lat, lon, a, 300));
+    L.polygon(sector, { color: '#0ea5e9', weight: 1, fillOpacity: 0.07, interactive: false }).addTo(me);
+    L.polyline([destPoint(lat, lon, windFrom, 120), [lat, lon]], { color: '#0ea5e9', weight: 3, interactive: false }).addTo(me);
+  }
+}
+
+function renderFireCharts(F) {
+  const { th, others, archive } = F;
+  // ---------- รายวัน ----------
+  const dates = [];
+  const d0 = parseLocal(state.fireRange.from);
+  for (let i = 0; i < state.fireRange.days; i++) { const d = new Date(d0); d.setDate(d.getDate() + i); dates.push(ymdOf(d)); }
+  const count = (list, d) => list.filter(p => ymdOf(p.t) === d).length;
+  const nb = Object.values(COUNTRIES).filter(c => c.code !== 'TH');
+  makeChart('fireDailyChart', {
+    type: 'bar',
+    data: {
+      labels: dates.map(dayLabel),
+      datasets: [
+        { label: 'ไทย', data: dates.map(d => count(th, d)), backgroundColor: '#f97316', borderRadius: 3 },
+        ...nb.map(c => ({ label: c.name, data: dates.map(d => count(others.filter(p => p.country === c.code), d)), backgroundColor: c.color + 'cc', borderRadius: 3 }))
+          .filter(ds => ds.data.some(v => v > 0)),
+      ],
+    },
+    options: { scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, title: { display: true, text: 'จุด' } } } },
+  });
+
+  // ---------- ประเภทพื้นที่ / ประเทศ ----------
+  let luLabels, luData, luColors;
+  if (archive) {
+    $('#fireLuTitle').textContent = 'จุดความร้อนแยกตามประเทศ';
+    const all = [...th, ...others], cs = [...Object.values(COUNTRIES), OTHER_COUNTRY].filter(c => all.some(p => p.country === c.code));
+    luLabels = cs.map(c => c.name); luData = cs.map(c => all.filter(p => p.country === c.code).length); luColors = cs.map(c => c.color);
+  } else {
+    $('#fireLuTitle').textContent = 'จุดความร้อนในไทยตามประเภทพื้นที่ (GISTDA)';
+    const m = {};
+    th.forEach(p => { m[p.lu] = (m[p.lu] || 0) + 1; });
+    const e = Object.entries(m).sort((a, b) => b[1] - a[1]);
+    luLabels = e.map(x => x[0]); luData = e.map(x => x[1]); luColors = luLabels.map(luColor);
+  }
+  makeChart('fireLuChart', {
+    type: 'doughnut',
+    data: { labels: luLabels, datasets: [{ data: luData, backgroundColor: luColors, borderColor: cssVar('--surface'), borderWidth: 2 }] },
+    options: {
+      cutout: '58%',
+      interaction: { mode: 'nearest', intersect: true },
+      plugins: {
+        legend: { position: 'right' },
+        tooltip: { callbacks: { label: c => `${c.label}: ${fmt(c.raw)} จุด (${fmt(c.raw / sum(luData) * 100, 1)}%)` } },
+      },
+    },
+  });
+
+  // ---------- จังหวัด (ซ้อนตามประเภทพื้นที่) ----------
+  if (archive || !th.some(p => p.pv)) {
+    $('#fireProvTitle').textContent = 'จังหวัดที่พบจุดความร้อนมากที่สุด — ใช้ได้เฉพาะโหมดล่าสุด (ข้อมูล GISTDA มีชื่อจังหวัด)';
+    state.charts.fireProvChart?.destroy();
+    return;
+  }
+  $('#fireProvTitle').textContent = 'จังหวัดที่พบจุดความร้อนมากที่สุด (15 อันดับ)';
+  const prov = {};
+  th.forEach(p => { (prov[p.pv] ||= {})[p.lu] = ((prov[p.pv] ||= {})[p.lu] || 0) + 1; });
+  const top = Object.entries(prov).map(([k, v]) => [k, v, sum(Object.values(v))]).sort((a, b) => b[2] - a[2]).slice(0, 15);
+  const lus = Object.keys(LANDUSE).filter(lu => top.some(([, v]) => v[lu]));
+  makeChart('fireProvChart', {
+    type: 'bar',
+    data: { labels: top.map(x => x[0]), datasets: lus.map(lu => ({ label: lu, data: top.map(([, v]) => v[lu] || 0), backgroundColor: luColor(lu), borderRadius: 2 })) },
+    options: {
+      indexAxis: 'y',
+      interaction: { mode: 'index', axis: 'y', intersect: false },
+      scales: { x: { stacked: true, title: { display: true, text: 'จุด' } }, y: { stacked: true } },
+    },
+  });
+}
+
+function renderFireTable(F, rebuildFilter = false) {
+  const all = [...F.th, ...F.others];
+  if (rebuildFilter) {
+    const provs = [...new Set(F.th.map(p => p.pv).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'th'));
+    const cs = [...new Set(F.others.map(p => p.country))];
+    $('#fireTableFilter').innerHTML = '<option value="">ทั้งหมด</option>' +
+      (provs.length ? `<optgroup label="จังหวัด (ไทย)">${provs.map(p => `<option value="pv:${p}">${p}</option>`).join('')}</optgroup>` : '<option value="c:TH">ไทย</option>') +
+      (cs.length ? `<optgroup label="ประเทศ">${cs.map(c => `<option value="c:${c}">${countryByCode(c).name}</option>`).join('')}</optgroup>` : '');
+  }
+  const f = $('#fireTableFilter').value;
+  const rows = all.filter(p => !f || (f.startsWith('pv:') ? p.pv === f.slice(3) : p.country === f.slice(2)))
+    .sort((a, b) => b.t - a.t);
+  const MAX = 400;
+  $('#fireTableCount').textContent = `${fmt(rows.length)} จุด${rows.length > MAX ? ` (แสดงล่าสุด ${MAX})` : ''}`;
+  const tbody = $('#fireTable tbody');
+  tbody.innerHTML = rows.length ? rows.slice(0, MAX).map((p, i) => `<tr data-i="${i}">
+    <td>${p.t.toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' })}</td>
+    <td class="wrap">${p.pv ? `<b>จ.${p.pv}</b> อ.${p.ap}<br><small class="muted">ต.${p.tb} · บ้าน${p.village || '–'}</small>` : `<b>${countryByCode(p.country).name}</b><br><small class="muted">${fmt(p.lat, 3)}, ${fmt(p.lon, 3)}</small>`}</td>
+    <td>${p.lu ? `<span class="badge" style="background:${luColor(p.lu)}">${p.lu}</span>${p.crop ? `<br><small class="muted">${p.crop}</small>` : ''}` : '–'}</td>
+    <td><b style="color:${frpColor(p.frp) === '#fde047' ? '#a16207' : frpColor(p.frp)}">${fmt(p.frp, 1)}</b></td>
+    <td>${{ high: 'สูง', nominal: 'ปกติ', low: 'ต่ำ' }[p.conf] || p.conf}</td>
+    <td><small>${p.sat}</small></td>
+    <td><a href="https://www.google.com/maps?q=${p.lat},${p.lon}" target="_blank" rel="noopener" title="Google Maps">🗺️</a></td>
+  </tr>`).join('') : '<tr><td colspan="7" class="muted">ไม่พบจุดความร้อน</td></tr>';
+  tbody.onclick = e => {
+    const tr = e.target.closest('tr[data-i]');
+    if (!tr || e.target.closest('a')) return;
+    const p = rows[+tr.dataset.i];
+    $('#fireMap').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    state.maps.fire.flyTo([p.lat, p.lon], 12);
+    L.popup().setLatLng([p.lat, p.lon]).setContent(firePopup(p)).openOn(state.maps.fire);
+  };
+}
+
+/* ---------- ดัชนีสภาพอากาศเอื้อต่อการเกิดไฟ ---------- */
+
+/**
+ * Angström index: I = RH/20 + (27 − T)/10  (ใช้ RH ต่ำสุดและอุณหภูมิสูงสุดของวัน)
+ * I < 2.0 เอื้อมาก · 2.0–2.5 เอื้อ · 2.5–4.0 ไม่เอื้อ · > 4.0 ไม่น่าเกิด
+ * ร่วมกับจำนวนวันติดต่อกันที่ไม่มีฝน (< 1 มม.) — ≥ 10 วัน เพิ่มระดับความเสี่ยง 1 ขั้น
+ */
+async function renderFireWeather() {
+  const { lat, lon } = state.loc;
+  try {
+    const j = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      '&daily=temperature_2m_max,relative_humidity_2m_min,wind_speed_10m_max,precipitation_sum&timezone=Asia%2FBangkok&past_days=30&forecast_days=7');
+    const d = j.daily, today = hourKey(nowAt(BKK_OFFSET)).slice(0, 10);
+    const i0 = Math.max(0, d.time.indexOf(today));
+    let dry = 0;
+    const dryArr = d.precipitation_sum.map(p => (dry = (p ?? 0) < 1 ? dry + 1 : 0));
+    const LV = [['ต่ำ', '#16a34a'], ['ปานกลาง', '#ca8a04'], ['สูง', '#ea580c'], ['สูงมาก', '#dc2626']];
+    const days = d.time.slice(i0, i0 + 7).map((t, k) => {
+      const i = i0 + k;
+      const I = d.relative_humidity_2m_min[i] / 20 + (27 - d.temperature_2m_max[i]) / 10;
+      let lv = I < 2 ? 3 : I < 2.5 ? 2 : I < 4 ? 1 : 0;
+      if (dryArr[i] >= 10 && lv < 3) lv += 1;
+      if ((d.precipitation_sum[i] ?? 0) >= 2 && lv > 0) lv -= 1; // ฝนทำให้เชื้อเพลิงเปียก
+      return { t, I, lv, dry: dryArr[i], T: d.temperature_2m_max[i], RH: d.relative_humidity_2m_min[i], W: d.wind_speed_10m_max[i], P: d.precipitation_sum[i] };
+    });
+    makeChart('fireWeatherChart', {
+      type: 'bar',
+      data: {
+        labels: days.map((x, k) => (k === 0 ? 'วันนี้' : dayLabel(x.t))),
+        datasets: [
+          { label: 'Angström index (ต่ำ = เอื้อต่อไฟ)', data: days.map(x => x.I), backgroundColor: days.map(x => LV[x.lv][1]), borderRadius: 4, yAxisID: 'y' },
+          { type: 'line', label: 'วันติดต่อกันที่ไม่มีฝน', data: days.map(x => x.dry), borderColor: '#a16207', pointRadius: 3, yAxisID: 'y1' },
+        ],
+      },
+      options: {
+        scales: {
+          y: { beginAtZero: true, suggestedMax: 5, title: { display: true, text: 'Angström' } },
+          y1: { position: 'right', beginAtZero: true, suggestedMax: 10, grid: { display: false }, title: { display: true, text: 'วัน' } },
+        },
+        plugins: {
+          tooltip: { callbacks: { afterBody: it => { const x = days[it[0].dataIndex]; return `อุณหภูมิสูงสุด ${fmt(x.T, 1)}°C · ความชื้นต่ำสุด ${fmt(x.RH)}% · ลม ${fmt(x.W)} กม./ชม. · ฝน ${fmt(x.P, 1)} มม.\nความเสี่ยง: ${LV[x.lv][0]}`; } } },
+        },
+      },
+    });
+    $('#fireWeatherNote').innerHTML = `<div class="fw-days">${days.map((x, k) => `<div class="fw-day" style="background:${LV[x.lv][1]}">${LV[x.lv][0]}<small>${k === 0 ? 'วันนี้' : dayLabel(x.t)}</small></div>`).join('')}</div>
+      <p class="hint">Angström index = RH/20 + (27 − T)/10 จากอุณหภูมิสูงสุดและความชื้นต่ำสุดของวัน: &lt; 2.0 เอื้อต่อไฟมาก, 2.0–2.5 เอื้อ, 2.5–4.0 ไม่ค่อยเอื้อ, &gt; 4.0 ไม่น่าเกิด · ไม่มีฝนติดต่อกัน ≥ 10 วัน เพิ่มความเสี่ยง 1 ระดับ · วันที่มีฝน ≥ 2 มม. ลด 1 ระดับ · ปัจจุบันไม่มีฝนติดต่อกัน ${days[0].dry} วัน</p>`;
+  } catch (e) {
+    $('#fireWeatherNote').innerHTML = `<p class="muted">โหลดข้อมูลสภาพอากาศไม่สำเร็จ: ${e.message}</p>`;
+  }
+}
+
+/* ---------- พื้นที่เผาไหม้ (GISTDA burn scar) ---------- */
+
+const SCAR_COLORS = { 'ป่าอนุรักษ์': '#166534', 'ป่าสงวนแห่งชาติ': '#65a30d', 'เขตปฏิรูปที่ดินเพื่อเกษตรกรรม': '#ca8a04', 'พื้นที่เกษตร': '#f97316', 'ชุมชนและอื่นๆ': '#a855f7', 'ริมทางหลวง 50 เมตร': '#64748b' };
+
+async function loadBurnScar() {
+  state.scarProvTouched = true;
+  const pv = $('#fireScarProv').value;
+  const info = $('#fireScarInfo');
+  info.textContent = `กำลังโหลดพื้นที่เผาไหม้ จ.${pv}…`;
+  const url = off => `${GISTDA_BASE}burn-scar?limit=1000&offset=${off}&pv_tn=${encodeURIComponent(pv)}&api_key=${GISTDA_KEY}`;
+  try {
+    const first = await getJSON(url(0), 90e3);
+    const total = first.numberMatched ?? 0, MAX = 5000;
+    const pages = [];
+    for (let off = 1000; off < Math.min(total, MAX); off += 1000) pages.push(getJSON(url(off), 90e3));
+    const feats = [first, ...(await Promise.all(pages))].flatMap(p => p.features || []);
+    const layer = state.fireLayers.scar;
+    layer.clearLayers();
+    if (!feats.length) { info.textContent = `ไม่พบพื้นที่เผาไหม้ใน จ.${pv}`; return; }
+    if (!state.maps.fire.hasLayer(layer)) layer.addTo(state.maps.fire);
+    const gj = L.geoJSON({ type: 'FeatureCollection', features: feats }, {
+      style: f => ({ color: SCAR_COLORS[f.properties.rp_name] || '#7c2d12', weight: 0.8, fillColor: '#7c2d12', fillOpacity: 0.45 }),
+      onEachFeature: (f, l) => {
+        const p = f.properties;
+        l.bindPopup(`<b>🟫 พื้นที่เผาไหม้</b><br>ต.${p.tb_tn} อ.${p.ap_tn} จ.${p.pv_tn}<br>พื้นที่ <b>${fmt(p.area_rai, 1)} ไร่</b><br>` +
+          `เขตพื้นที่: ${p.rp_name || '–'} · การใช้ที่ดิน: ${p.lu_name || '–'}<br><small>ช่วงตรวจพบ ${p.date}</small>`);
+      },
+    });
+    // แปลงเผาไหม้ส่วนใหญ่เล็ก (~10 ไร่) มองไม่เห็นเมื่อซูมออก → แสดงเป็นจุดศูนย์กลางก่อน แล้วสลับเป็นรูปแปลงเมื่อซูม ≥ 13
+    const dots = L.layerGroup(gj.getLayers().map(l => L.circleMarker(l.getBounds().getCenter(), {
+      radius: 2 + Math.min(Math.sqrt(l.feature.properties.area_rai || 0) / 6, 4), weight: 0.4, color: '#fff', fillColor: '#7c2d12', fillOpacity: 0.75,
+    }).bindPopup(l.getPopup())));
+    const sync = () => {
+      const z = state.maps.fire.getZoom();
+      if (z >= 13) { layer.removeLayer(dots); layer.addLayer(gj); } else { layer.removeLayer(gj); layer.addLayer(dots); }
+    };
+    state.maps.fire.off('zoomend', state.scarSync);
+    state.scarSync = sync;
+    state.maps.fire.on('zoomend', sync);
+    state.maps.fire.fitBounds(gj.getBounds(), { padding: [20, 20] });
+    sync();
+    const rai = sum(feats.map(f => f.properties.area_rai || 0));
+    const byRp = {};
+    feats.forEach(f => { const k = f.properties.rp_name || 'ไม่ระบุ'; byRp[k] = (byRp[k] || 0) + (f.properties.area_rai || 0); });
+    const dates = [...new Set(feats.map(f => f.properties.date))].sort();
+    info.innerHTML = `จ.${pv}: <b>${fmt(feats.length)}</b>${total > feats.length ? ` จาก ${fmt(total)}` : ''} แปลง · รวม <b>${fmt(rai)} ไร่</b> · ` +
+      Object.entries(byRp).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} ${fmt(v / rai * 100)}%`).join(', ') +
+      ` · ช่วง ${dates[0]?.slice(0, 8)}–${dates[dates.length - 1]?.slice(-8)}`;
+  } catch (e) {
+    info.textContent = `โหลดพื้นที่เผาไหม้ไม่สำเร็จ: ${e.message}`;
   }
 }
 

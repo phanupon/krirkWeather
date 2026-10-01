@@ -41,6 +41,7 @@
     <button class="tab" data-tab="flood">🌊 วิเคราะห์น้ำท่วม</button>
     <button class="tab" data-tab="water">💧 ข้อมูลน้ำ/เขื่อน</button>
     <button class="tab" data-tab="air">😷 คุณภาพอากาศ</button>
+    <button class="tab" data-tab="fire">🔥 ไฟป่า/จุดความร้อน</button>
     <button class="tab" data-tab="quake">🌐 แผ่นดินไหว</button>
     <button class="tab" data-tab="tide">🌙 น้ำขึ้นน้ำลง</button>
   </nav>
@@ -229,6 +230,101 @@
       <div class="card" id="airWaqi"></div>
     </section>
 
+    <!-- ================= ไฟป่า / จุดความร้อน (GISTDA + NASA FIRMS) ================= -->
+    <section id="tab-fire" class="panel">
+      <div class="status" id="fireStatus"></div>
+      <div class="card fire-toolbar">
+        <div class="seg" id="fireMode">
+          <button data-mode="live" class="active">🛰️ ล่าสุด</button>
+          <button data-mode="archive">📅 ย้อนหลัง (NASA)</button>
+        </div>
+        <label id="firePeriodWrap">ช่วงเวลา
+          <select id="firePeriod">
+            <option value="1day">24 ชั่วโมง</option>
+            <option value="3days">3 วัน</option>
+            <option value="7days" selected>7 วัน</option>
+            <option value="30days">30 วัน</option>
+          </select>
+        </label>
+        <label id="fireDateWrap" hidden>ตั้งแต่วันที่ <input type="date" id="fireDate">
+          <select id="fireDays">
+            <option value="1">1 วัน</option><option value="3" selected>3 วัน</option>
+            <option value="5">5 วัน</option><option value="7">7 วัน</option><option value="10">10 วัน</option>
+          </select>
+        </label>
+        <label>ดาวเทียม (NASA)
+          <select id="fireSat">
+            <option value="VIIRS_NOAA21">VIIRS NOAA-21</option>
+            <option value="VIIRS_NOAA20">VIIRS NOAA-20</option>
+            <option value="VIIRS_SNPP" selected>VIIRS Suomi-NPP</option>
+            <option value="MODIS">MODIS Terra/Aqua</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="fireNeighbors" checked> แสดงประเทศเพื่อนบ้าน</label>
+        <button id="fireReload" class="btn">ค้นหา</button>
+      </div>
+
+      <div class="tiles" id="fireTiles"></div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>ความเสี่ยงต่อตำแหน่งของคุณ <span class="muted" id="fireNearLoc"></span></h3>
+          <div id="fireNear"><div class="skeleton">กำลังวิเคราะห์…</div></div>
+        </div>
+        <div class="card">
+          <h3>สภาพอากาศเอื้อต่อการเกิดไฟ — 7 วันข้างหน้า</h3>
+          <div class="chart-box" style="height:230px"><canvas id="fireWeatherChart"></canvas></div>
+          <div id="fireWeatherNote"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="air-toolbar">
+          <label>สีจุดตาม
+            <select id="fireColor">
+              <option value="lu">ประเภทพื้นที่ (GISTDA)</option>
+              <option value="frp">ความรุนแรงของไฟ (FRP)</option>
+              <option value="age">ความสดของข้อมูล</option>
+              <option value="country">ประเทศ</option>
+            </select>
+          </label>
+          <label>พื้นที่เผาไหม้ (Burn scar) จังหวัด <select id="fireScarProv"></select></label>
+          <button id="fireScarBtn" class="btn">แสดงพื้นที่เผาไหม้</button>
+          <span class="muted" id="fireScarInfo"></span>
+        </div>
+        <div id="fireMap" class="map large" style="height:600px"></div>
+        <div class="map-legends" id="fireLegend"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>จำนวนจุดความร้อนรายวัน</h3>
+          <div class="chart-box"><canvas id="fireDailyChart"></canvas></div>
+        </div>
+        <div class="card">
+          <h3 id="fireLuTitle">จุดความร้อนในไทยตามประเภทพื้นที่</h3>
+          <div class="chart-box"><canvas id="fireLuChart"></canvas></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 id="fireProvTitle">จังหวัดที่พบจุดความร้อนมากที่สุด</h3>
+        <div class="chart-box tall"><canvas id="fireProvChart"></canvas></div>
+      </div>
+
+      <div class="card">
+        <h3>รายการจุดความร้อน</h3>
+        <div class="air-toolbar"><label>กรองจังหวัด/ประเทศ <select id="fireTableFilter"></select></label><span class="muted" id="fireTableCount"></span></div>
+        <div class="table-wrap scroll-y" style="max-height:520px">
+          <table class="data-table" id="fireTable">
+            <thead><tr><th>เวลา (ไทย)</th><th>ตำแหน่ง</th><th>ประเภทพื้นที่</th><th>FRP (MW)</th><th>ความเชื่อมั่น</th><th>ดาวเทียม</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">FRP (Fire Radiative Power) = พลังงานความร้อนที่แผ่จากไฟ ยิ่งสูงยิ่งรุนแรง · ข้อมูลจุดความร้อนในไทยจาก GISTDA (ระบุจังหวัด/อำเภอ/ตำบล/หมู่บ้านและประเภทการใช้ที่ดิน) · ประเทศเพื่อนบ้านและข้อมูลย้อนหลังจาก NASA FIRMS</p>
+      </div>
+    </section>
+
     <!-- ================= แผ่นดินไหว ================= -->
     <section id="tab-quake" class="panel">
       <div class="status" id="quakeStatus"></div>
@@ -313,12 +409,15 @@
     <a href="https://www.thaiwater.net" target="_blank" rel="noopener">ThaiWater (สสน.)</a> ·
     <a href="http://air4thai.pcd.go.th" target="_blank" rel="noopener">Air4Thai (กรมควบคุมมลพิษ)</a> ·
     <a href="https://waqi.info" target="_blank" rel="noopener">World Air Quality Index Project</a> ·
+    <a href="https://firms.modaps.eosdis.nasa.gov" target="_blank" rel="noopener">NASA FIRMS</a> ·
+    <a href="https://fire.gistda.or.th" target="_blank" rel="noopener">GISTDA</a> ·
     แผนที่ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a><br>
     ผลการพยากรณ์และวิเคราะห์เป็นข้อมูลประกอบการตัดสินใจเท่านั้น โปรดติดตามประกาศทางการจากกรมอุตุนิยมวิทยาและกรมป้องกันและบรรเทาสาธารณภัย
   </footer>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
