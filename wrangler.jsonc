@@ -1,0 +1,16 @@
+// การตั้งค่า Cloudflare Worker — Cloudflare อ่านไฟล์นี้ทุกครั้งที่ build จาก GitHub
+{
+  // ต้องตรงกับชื่อ Worker บน Cloudflare
+  "name": "krirkweather",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // ส่งเฉพาะเส้นทาง API เข้าโค้ด Worker ส่วนไฟล์อื่นให้ Cloudflare ส่งตรง (เร็วและไม่นับโควตา)
+    "run_worker_first": ["/api/*", "/proxy/*"]
+  },
+  "observability": { "enabled": true }
+  // คีย์ API (WAQI_TOKEN, FIRMS_KEY, GISTDA_KEY) ตั้งเป็น Secret ใน Dashboard
+  // หรือคำสั่ง: npx wrangler secret put WAQI_TOKEN — ห้ามใส่ในไฟล์นี้
+}

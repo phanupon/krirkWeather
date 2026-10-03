@@ -21,18 +21,20 @@ python server.py
 npx wrangler pages dev public
 ```
 
-## Deploy ขึ้น Cloudflare Pages (อัปเดตอัตโนมัติเมื่อ push ขึ้น GitHub)
+## Deploy ขึ้น Cloudflare Workers (อัปเดตอัตโนมัติเมื่อ push ขึ้น GitHub)
+
+โปรเจกต์ใช้ **Cloudflare Worker + Static Assets** ตาม `wrangler.jsonc`:
+ไฟล์ใน `public/` ส่งตรงจาก Cloudflare, เส้นทาง `/api/*` และ `/proxy/*` ทำงานใน `worker/index.js` (ใช้ handler ชุดเดียวกับ `functions/`)
 
 ตั้งค่าครั้งเดียว:
 
-1. Cloudflare Dashboard → **Workers & Pages** → **Create** → แท็บ **Pages** → **Connect to Git** → เลือก repo `krirkWeather`
-2. Build settings:
-   - Framework preset: **None**
+1. Worker ชื่อ **`krirkweather`** ที่เชื่อม GitHub ไว้แล้ว → **Settings → Builds** ตรวจว่า
+   - Root directory: *(เว้นว่าง / `/`)*
    - Build command: *(เว้นว่าง)*
-   - Build output directory: **`public`**
-   - Root directory: *(เว้นว่าง — โฟลเดอร์ `functions/` ต้องอยู่ที่ root ของ repo)*
-3. **Save and Deploy**
-4. ไปที่โปรเจกต์ → **Settings** → **Variables and Secrets** → **Add** ชนิด **Secret** ให้ครบทั้ง Production (และ Preview ถ้าใช้):
+   - Deploy command: **`npx wrangler deploy`**
+   - Production branch: `main`
+2. `git push` — Cloudflare จะอ่าน `wrangler.jsonc` แล้ว deploy เป็น Worker ที่มีโค้ด (ชื่อใน `wrangler.jsonc` ต้องตรงกับชื่อ Worker)
+3. หลัง deploy สำเร็จ → **Settings → Variables and secrets** (จะเพิ่มได้แล้ว) → **Add** ชนิด **Secret**:
 
    | ชื่อ | ค่า |
    |---|---|
@@ -40,14 +42,19 @@ npx wrangler pages dev public
    | `FIRMS_KEY` | MAP KEY จาก https://firms.modaps.eosdis.nasa.gov/api/map_key/ |
    | `GISTDA_KEY` | API key จาก GISTDA API Gateway |
 
-5. **Deployments** → deployment ล่าสุด → **Retry deployment** (secret มีผลกับ deployment ใหม่เท่านั้น)
+   Secret มีผลทันทีโดยไม่ต้อง deploy ใหม่ และจะคงอยู่เมื่อ deploy ครั้งต่อไป
 
-หลังจากนั้นทุกครั้งที่ `git push` ขึ้น branch `main` Cloudflare จะ deploy ให้อัตโนมัติ (branch อื่นจะได้ Preview URL)
+หลังจากนั้นทุกครั้งที่ `git push` ขึ้น branch `main` Cloudflare จะ build และ deploy ให้อัตโนมัติ
 
-ตรวจหลัง deploy: เปิด `https://<โปรเจกต์>.pages.dev/api/firms/data_availability/csv/all` ควรได้ตาราง CSV
-ถ้าได้ข้อความ "ยังไม่ได้ตั้งค่า secret …" แปลว่ายังตั้ง Secret ไม่ครบหรือยังไม่ได้ deploy ใหม่
+ตรวจหลัง deploy: เปิด `https://krirkweather.<บัญชี>.workers.dev/api/firms/data_availability/csv/all` ควรได้ตาราง CSV
+ถ้าได้ข้อความ "ยังไม่ได้ตั้งค่า secret …" แปลว่ายังตั้ง Secret ไม่ครบ
 
-### เส้นทาง API ของเรา (Pages Functions)
+> ถ้าต้องการใช้ **Cloudflare Pages** แทน: สร้างโปรเจกต์ Pages → Connect to Git, Build output directory = `public`
+> แล้วตั้ง Secret เหมือนกัน — Pages จะใช้โค้ดใน `functions/` โดยอัตโนมัติ (ไม่ใช้ `wrangler.jsonc`/`worker/`)
+
+ทดสอบแบบ Worker บนเครื่อง (อ่าน `.dev.vars`): `npx wrangler dev` แล้วเปิด http://localhost:8787
+
+### เส้นทาง API ของเรา
 
 | เส้นทาง | ต้นทาง | คีย์ | แคชที่ edge |
 |---|---|---|---|
@@ -117,7 +124,9 @@ public/                     ไฟล์ที่ Cloudflare เผยแพร�
   index.html                หน้าเว็บหลัก
   css/style.css             สไตล์ (รองรับโหมดมืด/มือถือ)
   js/app.js                 ตรรกะทั้งหมด: โหลดข้อมูล วิเคราะห์ และแสดงผล (ไม่มีคีย์)
-functions/                  Cloudflare Pages Functions (ทำงานฝั่งเซิร์ฟเวอร์)
+wrangler.jsonc              การตั้งค่า Cloudflare Worker (ชื่อ, static assets, เส้นทางที่เข้าโค้ด)
+worker/index.js             จุดเริ่มต้นของ Worker: ส่ง /api/* และ /proxy/* ไปยัง handler ใน functions/
+functions/                  handler ฝั่งเซิร์ฟเวอร์ (ใช้ได้ทั้ง Worker และ Pages Functions)
   _lib/proxy.js             ฟังก์ชันช่วย: ส่งต่อคำขอ แคช และลบคีย์ออกจากผลลัพธ์
   api/waqi/[[path]].js      /api/waqi/*
   api/firms/[[path]].js     /api/firms/*
