@@ -38,6 +38,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="overview">🌤️ พยากรณ์อากาศ</button>
     <button class="tab" data-tab="rain">🌧️ ทำนายฝน</button>
+    <button class="tab" data-tab="radar">📡 เรดาร์ฝน</button>
     <button class="tab" data-tab="flood">🌊 วิเคราะห์น้ำท่วม</button>
     <button class="tab" data-tab="water">💧 ข้อมูลน้ำ/เขื่อน</button>
     <button class="tab" data-tab="air">😷 คุณภาพอากาศ</button>
@@ -89,6 +90,10 @@
         </div>
       </div>
       <div class="card">
+        <h3>📡 ฝนระยะสั้นจากเรดาร์ — 90 นาทีข้างหน้า <span class="muted">(RainViewer + แบบจำลอง)</span></h3>
+        <div id="rainRadar"><div class="skeleton">กำลังวิเคราะห์ภาพเรดาร์…</div></div>
+      </div>
+      <div class="card">
         <h3>ฝนที่ตรวจวัดได้จริง 24 ชม. — สถานีใกล้เคียง <span class="muted">(ThaiWater)</span></h3>
         <div id="rainObs"><div class="skeleton">กำลังโหลดข้อมูลสถานีวัดฝน…</div></div>
       </div>
@@ -99,6 +104,51 @@
       <div class="card">
         <h3>ปริมาณฝนรายวัน (16 วัน)</h3>
         <div class="chart-box"><canvas id="rainDailyChart"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ================= เรดาร์ฝน (RainViewer + กรมฝนหลวงฯ) ================= -->
+    <section id="tab-radar" class="panel">
+      <div class="status" id="radarStatus"></div>
+      <div class="radar-hero" id="radarHero"><div class="card"><div class="skeleton">กำลังดึงภาพเรดาร์และคำนวณการเคลื่อนตัวของกลุ่มฝน…</div></div></div>
+
+      <div class="card">
+        <div class="radar-player">
+          <button class="btn icon" id="rvPrev" title="ภาพก่อนหน้า">⏮</button>
+          <button class="btn icon" id="rvPlay" title="เล่น/หยุด">▶</button>
+          <button class="btn icon" id="rvNext" title="ภาพถัดไป">⏭</button>
+          <input type="range" id="rvSlider" min="0" max="0" value="0">
+          <span class="rv-time" id="rvTime">–</span>
+          <label class="chk"><input type="checkbox" id="rvShowNowcast" checked> แสดงคาดการณ์</label>
+          <label>ความทึบ <input type="range" id="rvOpacity" min="20" max="100" value="75" style="width:80px"></label>
+        </div>
+        <div id="radarMap" class="map large" style="height:580px"></div>
+        <div class="map-legends" id="radarLegend"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>โอกาสฝนที่ตำแหน่งของคุณ — 6 ชั่วโมงข้างหน้า</h3>
+          <div class="chart-box"><canvas id="radarProbChart"></canvas></div>
+          <div id="radarSkill"></div>
+        </div>
+        <div class="card">
+          <h3>ความแรงของฝนรอบตำแหน่ง <span class="muted">(รัศมี ~12 กม.)</span></h3>
+          <div class="chart-box"><canvas id="radarRateChart"></canvas></div>
+          <p class="hint">ค่าเฉลี่ยเชิงพื้นที่ (มม./ชม.) แปลงจากค่าสะท้อนเรดาร์ด้วยสมการ Marshall–Palmer (Z = 200R<sup>1.6</sup>) · เส้นทึบ = สังเกตการณ์ · เส้นประ = คาดการณ์จากการเลื่อนกลุ่มฝน</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>ภาพเรดาร์ความละเอียดสูง — กรมฝนหลวงและการบินเกษตร <span class="muted">(CAPPI 2.5 กม., ทุก 6 นาที, รัศมี 240 กม.)</span></h3>
+        <div class="radar-player">
+          <label>สถานี <select id="drStation"></select></label>
+          <button class="btn icon" id="drPlay" title="เล่น/หยุด">▶</button>
+          <input type="range" id="drSlider" min="0" max="0" value="0">
+          <span class="rv-time" id="drTime">–</span>
+        </div>
+        <div class="drraa-view" id="drView"><div class="skeleton">กำลังโหลด…</div></div>
+        <p class="hint">ภาพจาก <a href="https://gdcatalog.go.th/dataset/gdpublish-drraa_12_01" target="_blank" rel="noopener">ชุดข้อมูลเปิดภาครัฐ: ภาพเรดาร์ตรวจอากาศ กรมฝนหลวงและการบินเกษตร</a> · ตำแหน่งสถานีเป็นค่าประมาณ ใช้เลือกสถานีที่ใกล้ที่สุดเท่านั้น</p>
       </div>
     </section>
 
@@ -410,6 +460,8 @@
     <a href="http://air4thai.pcd.go.th" target="_blank" rel="noopener">Air4Thai (กรมควบคุมมลพิษ)</a> ·
     <a href="https://waqi.info" target="_blank" rel="noopener">World Air Quality Index Project</a> ·
     <a href="https://firms.modaps.eosdis.nasa.gov" target="_blank" rel="noopener">NASA FIRMS</a> ·
+    <a href="https://www.rainviewer.com" target="_blank" rel="noopener">RainViewer</a> ·
+    <a href="https://www.royalrain.go.th" target="_blank" rel="noopener">กรมฝนหลวงและการบินเกษตร</a> ·
     <a href="https://fire.gistda.or.th" target="_blank" rel="noopener">GISTDA</a> ·
     แผนที่ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a><br>
     ผลการพยากรณ์และวิเคราะห์เป็นข้อมูลประกอบการตัดสินใจเท่านั้น โปรดติดตามประกาศทางการจากกรมอุตุนิยมวิทยาและกรมป้องกันและบรรเทาสาธารณภัย

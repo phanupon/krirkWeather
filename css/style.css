@@ -290,7 +290,7 @@ select {
   display: inline-block; margin: 6px 0; padding: 3px 12px; border-radius: 999px;
   font-weight: 700; font-size: .88rem;
 }
-.aqi-main .advice-box {
+.aqi-main .advice-box, .nc-main .advice-box {
   margin-top: 14px; padding: 10px 12px; border-radius: 10px;
   background: var(--surface-2); font-size: .88rem;
 }
@@ -380,6 +380,31 @@ input[type=date] {
 .fw-day { text-align: center; border-radius: 8px; padding: 4px 2px; font-size: .74rem; color: #fff; font-weight: 600; }
 .fw-day small { display: block; font-weight: 400; opacity: .9; }
 
+/* ---------- radar ---------- */
+.radar-hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; margin-bottom: 18px; }
+.radar-hero > .card { margin-bottom: 0; }
+.nc-main { border-top: 5px solid var(--nc, var(--primary)); }
+.nc-now { font-size: 1.35rem; font-weight: 700; margin: 2px 0 6px; }
+.nc-probs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+.nc-prob { background: var(--surface-2); border-radius: 12px; padding: 10px; text-align: center; }
+.nc-prob .lead { font-size: .8rem; color: var(--muted); }
+.nc-prob .pv { font-size: 1.7rem; font-weight: 700; line-height: 1.2; }
+.nc-prob .bar { height: 6px; border-radius: 3px; background: var(--border); margin-top: 6px; overflow: hidden; }
+.nc-prob .bar span { display: block; height: 100%; }
+.motion { display: flex; gap: 14px; align-items: center; }
+.motion svg { width: 84px; height: 84px; flex-shrink: 0; }
+.radar-player { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 10px; }
+.radar-player input[type=range]#rvSlider, .radar-player input[type=range]#drSlider { flex: 1; min-width: 160px; accent-color: var(--primary); }
+.radar-player label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: .9rem; }
+.btn.icon { padding: 6px 11px; font-size: 1rem; line-height: 1; }
+.rv-time { min-width: 190px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rv-time.fc { color: #a855f7; }
+.dbz-bar { display: inline-flex; height: 12px; width: 260px; border-radius: 3px; overflow: hidden; vertical-align: middle; margin: 0 6px; }
+.dbz-bar span { flex: 1; }
+.drraa-view { display: flex; justify-content: center; background: #0b1220; border-radius: 10px; overflow: hidden; min-height: 300px; align-items: center; }
+.drraa-view img { max-width: 100%; height: auto; display: block; }
+.drraa-view .skeleton { color: #94a3b8; }
+
 footer {
   text-align: center; color: var(--muted); font-size: .82rem;
   padding: 24px 16px 32px; border-top: 1px solid var(--border);
@@ -390,7 +415,8 @@ footer {
 @media (max-width: 860px) {
   .grid-2 { grid-template-columns: 1fr; gap: 0; }
   .nearby, .obs-grid { grid-template-columns: 1fr; }
-  .air-hero, .waqi-grid { grid-template-columns: 1fr; }
+  .air-hero, .waqi-grid, .radar-hero { grid-template-columns: 1fr; }
+  .rv-time { min-width: 0; }
   .pol-grid { grid-template-columns: repeat(2, 1fr); }
   .topbar, .locbar, main { padding-left: 16px; padding-right: 16px; }
   .tabs { padding: 6px 16px 0; }

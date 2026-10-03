@@ -302,6 +302,7 @@ function initTabs() {
 function ensureTab(tab) {
   if (state.loaded[tab]) return;
   if (tab === 'flood' && state.weather) { state.loaded.flood = true; loadFlood(); }
+  if (tab === 'radar') { state.loaded.radar = true; loadRadar(); }
   if (tab === 'water') { state.loaded.water = true; loadWater(); }
   if (tab === 'air') { state.loaded.air = true; loadAir(); }
   if (tab === 'fire') { state.loaded.fire = true; loadFire(); }
@@ -330,6 +331,7 @@ async function loadWeatherAll() {
     state.weather = w;
     renderOverview(w);
     renderRain(w);
+    renderRainRadarCard();
     loadThaiWater()
       .then(tw => { if (state.weather === w) renderRainObs(tw); })
       .catch(e => { $('#rainObs').innerHTML = `<p class="muted">โหลดข้อมูลสถานีวัดฝน ThaiWater ไม่สำเร็จ: ${e.message}</p>`; });
@@ -544,6 +546,675 @@ function renderRain(w) {
       },
     },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* เรดาร์ฝน + พยากรณ์ฝนระยะสั้น (nowcast)                                */
+/*   RainViewer : ภาพเรดาร์รวมทุก 10 นาที ย้อนหลัง 2 ชม. (ถอดค่า dBZ จากสี)  */
+/*   กรมฝนหลวงฯ  : ภาพ CAPPI ความละเอียดสูงรายสถานี ทุก 6 นาที             */
+/*                                                                      */
+/*   Nowcast: ประมาณเวกเตอร์การเคลื่อนตัวของกลุ่มฝน (block matching)       */
+/*   แล้วเลื่อนภาพล่าสุดไปข้างหน้า (semi-Lagrangian) และคิดโอกาสฝนเป็น       */
+/*   สัดส่วนพื้นที่มีฝนในรัศมี ~12 กม. (neighbourhood probability)          */
+/*   ทดสอบกับข้อมูลจริง: Brier score ดีกว่าการคงสภาพ (persistence) ~30%     */
+/*   ที่ +30 นาที จึงผสมกับแบบจำลองโดยลดน้ำหนักเรดาร์ลงจนเป็น 0 ที่ +90 นาที  */
+/* ------------------------------------------------------------------ */
+
+// RainViewer "Universal Blue" palette: dBZ −32…95 (8 hex/ค่า, RGBA) จาก rainviewer_api_colors_table.csv
+const RV_UB_RAIN = '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006361591466635a1969665c1e6c685d246f6b5f29726e612e75706234787364397c75653e7f786744827b6949857d6a4e88806c548b826d598e856f5e928871649e93756eaa9e7978b6a97e82c2b4828ccec08796d2c48ba0d6c88faadacc93b4ded097be88ddeeff6cd1ebff51c5e8ff36bae5ff1baee2ff00a3e0ff009ad5ff0091caff0088bfff007fb4ff0077aaff0070a3ff00699cff006295ff005b8eff005588ff005180ff004e78ff004a70ff004768ffffee00ffffe000ffffd200ffffc500ffffb700ffffaa00ffff9f00ffff9500ffff8b00ffff8100ffff4400fff23600ffe62800ffd91b00ffcd0d00ffc10000ffa80000ff8f0000ff760000ff5d0000ffffaaffffff9fffffff95ffffff8bffffff81ffffff77ffffff6cffffff62ffffff58ffffff4effffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff';
+const RV_UB_SNOW = '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cfffff00ceffff0ccdffff19ccffff26cbffff33cbffff3fcaffff4cc9ffff59c8ffff66c7ffff72c7ffff7fc6ffff8cc5ffff99c4ffffa5c3ffffb2c3ffffbfc2ffffccc1ffffd8c0ffffe5bffffff2bfffffffb8f8ffffb2f2ffffabebffffa5e5ffff9fdfffff98d8ffff92d2ffff8bcbffff85c5ffff7fbfffff78b8ffff72b2ffff6babffff65a5ffff5f9fffff5b9bffff5898ffff5595ffff5292ffff4f8fffff4b8bffff4888ffff4585ffff4282ffff3f7fffff3b7bffff3878ffff3575ffff3272ffff2f6fffff2b6bffff2868ffff2565ffff2262ffff1f5fffff1b5bffff1858ffff1555ffff1252ffff0f4fffff0c4bffff0948ffff0645ffff0242ffff003fffff003bffff0038ffff0035ffff0032ffff002fffff002bffff0028ffff0025ffff0022ffff001fffff001bffff0018ffff0015ffff0012ffff000fffff000cffff0009ffff0006ffff0002ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff';
+
+const RV_API = 'https://api.rainviewer.com/public/weather-maps.json';
+const RV_Z = 7;            // ซูมสูงสุดที่ RainViewer (บริการฟรี) ให้ข้อมูล ~1.2 กม./px
+const RV_N = 3;            // โดเมนวิเคราะห์ 3×3 ไทล์ (~900 กม.)
+const RV_S = 256 * RV_N;   // 768 px
+const NC_STEPS = 9;        // คาดการณ์ 9 × 10 นาที = 90 นาที
+const NC_R = 10;           // รัศมีย่าน 10 px ≈ 12 กม.
+const RAIN_DBZ = 20;       // ≥ 20 dBZ ≈ ฝน 0.6 มม./ชม. ขึ้นไป
+const NC_BLEND_MIN = 90;   // น้ำหนักเรดาร์ลดเป็นเส้นตรงจาก 1 → 0 ภายใน 90 นาที
+
+const hexRgba = (s, i) => [0, 2, 4, 6].map(k => parseInt(s.substr(i * 8 + k, 2), 16));
+// Uint32 ของ ImageData (little-endian) = A<<24 | B<<16 | G<<8 | R
+const rgbaKey = (r, g, b, a) => ((a << 24) | (b << 16) | (g << 8) | r) >>> 0;
+const RV_TABLE = [RV_UB_RAIN, RV_UB_SNOW].flatMap(s => Array.from({ length: 128 }, (_, i) => [...hexRgba(s, i), i - 32]))
+  .filter(([, , , a]) => a > 0);
+const RV_DECODE = new Map();
+RV_TABLE.forEach(([r, g, b, a, d]) => { const k = rgbaKey(r, g, b, a); if (!RV_DECODE.has(k)) RV_DECODE.set(k, d); });
+/** สี → dBZ (canvas อาจปัดค่าสีโปร่งแสง จึงหาสีที่ใกล้ที่สุดเมื่อไม่ตรงพอดี) */
+function rvDecode(v) {
+  if ((v >>> 24) === 0) return -32;
+  let d = RV_DECODE.get(v);
+  if (d !== undefined) return d;
+  const r = v & 255, g = (v >>> 8) & 255, b = (v >>> 16) & 255, a = v >>> 24;
+  let best = Infinity;
+  RV_TABLE.forEach(([R, G, B, A, D]) => { const e = (R - r) ** 2 + (G - g) ** 2 + (B - b) ** 2 + (A - a) ** 2; if (e < best) { best = e; d = D; } });
+  RV_DECODE.set(v, d);
+  return d;
+}
+const RV_RGBA = new Uint8ClampedArray(128 * 4);
+for (let i = 0; i < 128; i++) hexRgba(RV_UB_RAIN, i).forEach((v, k) => { RV_RGBA[i * 4 + k] = v; });
+const dbzColor = d => { const i = clamp(Math.round(d) + 32, 0, 127) * 4; return `rgba(${RV_RGBA[i]},${RV_RGBA[i + 1]},${RV_RGBA[i + 2]},${RV_RGBA[i + 3] / 255})`; };
+/** Marshall–Palmer: Z = 200 R^1.6 */
+const dbzToRate = d => (d < 15 ? 0 : Math.pow(Math.pow(10, d / 10) / 200, 1 / 1.6));
+const rateName = r => (r < 0.1 ? 'ไม่มีฝน' : r < 2.5 ? 'ฝนเล็กน้อย' : r < 7.6 ? 'ฝนปานกลาง' : r < 50 ? 'ฝนหนัก' : 'ฝนหนักมาก');
+
+const tileXYf = (lat, lon, z) => {
+  const n = 2 ** z;
+  return { x: (lon + 180) / 360 * n, y: (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * n };
+};
+const tile2lat = (y, z) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / 2 ** z))) * 180 / Math.PI;
+const tile2lon = (x, z) => x / 2 ** z * 360 - 180;
+const rvTileUrl = (host, path, z, x, y) => `${host}${path}/256/${z}/${x}/${y}/2/1_1.png`;
+const unixHHMM = (t, off) => { const d = new Date((t + off) * 1000); return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`; };
+
+function loadRvIndex() {
+  if (state.rvIndexPromise && Date.now() - state.rvIndexTime < 3 * 60e3) return state.rvIndexPromise;
+  state.rvIndexTime = Date.now();
+  state.rvIndexPromise = getJSON(RV_API, 20e3);
+  state.rvIndexPromise.catch(() => { state.rvIndexTime = 0; });
+  return state.rvIndexPromise;
+}
+
+function loadImg(url) {
+  return new Promise((res, rej) => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error('โหลดภาพเรดาร์ไม่สำเร็จ'));
+    im.src = url;
+  });
+}
+
+const rvGridCache = new Map();
+/** โหลดไทล์ 3×3 ของเฟรมหนึ่ง แล้วถอดเป็นตาราง dBZ (Float32Array RV_S×RV_S) */
+function rvGrid(host, path, cx, cy) {
+  const key = `${path}|${cx}|${cy}`;
+  if (rvGridCache.has(key)) return rvGridCache.get(key);
+  if (rvGridCache.size > 40) rvGridCache.delete(rvGridCache.keys().next().value);
+  const p = (async () => {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = RV_S;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    const jobs = [];
+    for (let j = 0; j < RV_N; j++) {
+      for (let i = 0; i < RV_N; i++) {
+        jobs.push(loadImg(rvTileUrl(host, path, RV_Z, cx - 1 + i, cy - 1 + j)).then(im => ctx.drawImage(im, i * 256, j * 256)));
+      }
+    }
+    await Promise.all(jobs);
+    const px = new Uint32Array(ctx.getImageData(0, 0, RV_S, RV_S).data.buffer);
+    const g = new Float32Array(RV_S * RV_S);
+    for (let i = 0; i < px.length; i++) g[i] = rvDecode(px[i]);
+    return g;
+  })();
+  p.catch(() => rvGridCache.delete(key));
+  rvGridCache.set(key, p);
+  return p;
+}
+
+/** ลดความละเอียด 2× (ค่าสูงสุด) และตัดค่าต่ำกว่า 10 dBZ */
+function down2(g) {
+  const n = RV_S / 2, out = new Float32Array(n * n);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const i = 2 * y * RV_S + 2 * x;
+      out[y * n + x] = Math.max(0, Math.max(g[i], g[i + 1], g[i + RV_S], g[i + RV_S + 1]) - 10);
+    }
+  }
+  return out;
+}
+
+/** Block matching ระหว่างสองเฟรม → เวกเตอร์ต่อบล็อก (px ของกริดลดความละเอียด / 10 นาที) */
+function motionPair(A, Bm, B = 48, R = 6) {
+  const n = RV_S / 2, nb = n / B, W = 2 * R + 1;
+  const vx = new Float32Array(nb * nb).fill(NaN), vy = new Float32Array(nb * nb).fill(NaN);
+  const sc = new Float64Array(W * W);
+  for (let by = 0; by < nb; by++) {
+    for (let bx = 0; bx < nb; bx++) {
+      const y0 = by * B, x0 = bx * B;
+      let echo = 0;
+      for (let y = 0; y < B; y++) for (let x = 0; x < B; x++) if (Bm[(y0 + y) * n + x0 + x] > 10) echo++;
+      if (echo < 0.03 * B * B) continue; // ฝนน้อยเกินไปสำหรับประมาณการเคลื่อนที่
+      sc.fill(Infinity);
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const ys = y0 - dy, xs = x0 - dx;
+          if (ys < 0 || xs < 0 || ys + B > n || xs + B > n) continue;
+          let s = 0;
+          for (let y = 0; y < B; y++) {
+            const ra = (ys + y) * n + xs, rb = (y0 + y) * n + x0;
+            for (let x = 0; x < B; x++) { const d = A[ra + x] - Bm[rb + x]; s += d * d; }
+          }
+          sc[(dy + R) * W + dx + R] = s;
+        }
+      }
+      let bi = 0;
+      for (let i = 1; i < sc.length; i++) if (sc[i] < sc[bi]) bi = i;
+      const iy = Math.floor(bi / W), ix = bi % W;
+      const sub = (a, b, c) => { const d = a - 2 * b + c; return isFinite(d) && d > 0 ? clamp(0.5 * (a - c) / d, -0.5, 0.5) : 0; };
+      const oy = iy > 0 && iy < W - 1 ? sub(sc[(iy - 1) * W + ix], sc[bi], sc[(iy + 1) * W + ix]) : 0;
+      const ox = ix > 0 && ix < W - 1 ? sub(sc[bi - 1], sc[bi], sc[bi + 1]) : 0;
+      vx[by * nb + bx] = ix - R + ox;
+      vy[by * nb + bx] = iy - R + oy;
+    }
+  }
+  return { vx, vy, nb };
+}
+
+/** รวมเวกเตอร์จากหลายคู่เฟรม เติมบล็อกที่ไม่มีฝนด้วยค่ามัธยฐาน แล้วทำให้เรียบ 3×3 */
+function motionField(pairs) {
+  const ms = pairs.map(([a, b]) => motionPair(a, b));
+  const nb = ms[0].nb, N = nb * nb;
+  const vx = new Float32Array(N), vy = new Float32Array(N), ok = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    let sx = 0, sy = 0, c = 0;
+    ms.forEach(m => { if (!isNaN(m.vx[i])) { sx += m.vx[i]; sy += m.vy[i]; c++; } });
+    if (c) { vx[i] = sx / c; vy[i] = sy / c; ok[i] = 1; }
+  }
+  const med = arr => { const v = [...arr].filter((_, i) => ok[i]).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : 0; };
+  const gx = med(vx), gy = med(vy);
+  for (let i = 0; i < N; i++) if (!ok[i]) { vx[i] = gx; vy[i] = gy; }
+  const sm = v => v.map((_, i) => {
+    const by = Math.floor(i / nb), bx = i % nb;
+    let s = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) s += v[clamp(by + dy, 0, nb - 1) * nb + clamp(bx + dx, 0, nb - 1)];
+    return s / 9;
+  });
+  return { vx: sm(vx), vy: sm(vy), nb, gx, gy, valid: ok.reduce((a, b) => a + b, 0) };
+}
+
+/** ขยายสนามเวกเตอร์เป็นความละเอียดเต็ม (bilinear) หน่วย px เต็ม / 10 นาที */
+function upsampleField(F) {
+  const { nb } = F, U = new Float32Array(RV_S * RV_S), V = new Float32Array(RV_S * RV_S);
+  for (let y = 0; y < RV_S; y++) {
+    const fy = (y + 0.5) / RV_S * nb - 0.5, y0 = clamp(Math.floor(fy), 0, nb - 1), y1 = Math.min(y0 + 1, nb - 1), wy = clamp(fy - y0, 0, 1);
+    for (let x = 0; x < RV_S; x++) {
+      const fx = (x + 0.5) / RV_S * nb - 0.5, x0 = clamp(Math.floor(fx), 0, nb - 1), x1 = Math.min(x0 + 1, nb - 1), wx = clamp(fx - x0, 0, 1);
+      const bl = (a) => (a[y0 * nb + x0] * (1 - wy) * (1 - wx) + a[y0 * nb + x1] * (1 - wy) * wx + a[y1 * nb + x0] * wy * (1 - wx) + a[y1 * nb + x1] * wy * wx) * 2;
+      U[y * RV_S + x] = bl(F.vx);
+      V[y * RV_S + x] = bl(F.vy);
+    }
+  }
+  return { U, V };
+}
+
+/** เลื่อนภาพไปข้างหน้า steps × 10 นาที (backward semi-Lagrangian) */
+function advect(src, VF, steps) {
+  const out = new Float32Array(RV_S * RV_S);
+  for (let y = 0; y < RV_S; y++) {
+    for (let x = 0; x < RV_S; x++) {
+      const i = y * RV_S + x;
+      const sx = Math.round(x - VF.U[i] * steps), sy = Math.round(y - VF.V[i] * steps);
+      out[i] = sx < 0 || sy < 0 || sx >= RV_S || sy >= RV_S ? -32 : src[sy * RV_S + sx];
+    }
+  }
+  return out;
+}
+
+/** สัดส่วนพื้นที่มีฝนและความแรงฝนเฉลี่ยในรัศมี r รอบจุด (px, py) */
+function pointStats(g, px, py, r = NC_R) {
+  let n = 0, wet = 0, rate = 0;
+  const cx = Math.round(px), cy = Math.round(py);
+  for (let y = cy - r; y <= cy + r; y++) {
+    for (let x = cx - r; x <= cx + r; x++) {
+      if (x < 0 || y < 0 || x >= RV_S || y >= RV_S) continue;
+      const d = g[y * RV_S + x];
+      n++;
+      if (d >= RAIN_DBZ) wet++;
+      rate += dbzToRate(d);
+    }
+  }
+  const c = g[clamp(cy, 0, RV_S - 1) * RV_S + clamp(cx, 0, RV_S - 1)];
+  return { prob: n ? wet / n : 0, rate: n ? rate / n : 0, dbz: c, pointRate: dbzToRate(c) };
+}
+
+/** ความน่าจะเป็นแบบย่านสำหรับทุกพิกเซล (integral image) */
+function neighbourhoodProb(g, r = NC_R) {
+  const S = RV_S, I = new Float64Array((S + 1) * (S + 1));
+  for (let y = 0; y < S; y++) {
+    let row = 0;
+    for (let x = 0; x < S; x++) {
+      row += g[y * S + x] >= RAIN_DBZ ? 1 : 0;
+      I[(y + 1) * (S + 1) + x + 1] = I[y * (S + 1) + x + 1] + row;
+    }
+  }
+  const P = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(S, y + r + 1);
+    for (let x = 0; x < S; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(S, x + r + 1);
+      const s = I[y1 * (S + 1) + x1] - I[y0 * (S + 1) + x1] - I[y1 * (S + 1) + x0] + I[y0 * (S + 1) + x0];
+      P[y * S + x] = s / ((y1 - y0) * (x1 - x0));
+    }
+  }
+  return P;
+}
+
+/**
+ * คำนวณ nowcast สำหรับตำแหน่ง (แคชตามเฟรมล่าสุด + ตำแหน่ง)
+ * ใช้ 7 เฟรมล่าสุด (60 นาที): 3 คู่ล่าสุดหาการเคลื่อนตัว และทดสอบย้อนหลังด้วยการทำนายจากเฟรม −30 นาที
+ */
+async function computeNowcast(lat, lon) {
+  const idx = await loadRvIndex();
+  const past = idx.radar?.past || [];
+  if (past.length < 7) throw new Error('ข้อมูลเรดาร์ย้อนหลังไม่พอ');
+  const tf = tileXYf(lat, lon, RV_Z), cx = Math.floor(tf.x), cy = Math.floor(tf.y);
+  const key = `${past[past.length - 1].path}|${lat}|${lon}`;
+  if (state.nowcast?.key === key) return state.nowcast;
+  if (state.nowcastJob?.key === key) return state.nowcastJob.promise;
+
+  const promise = (async () => {
+    const use = past.slice(-7);
+    const grids = await Promise.all(use.map(f => rvGrid(idx.host, f.path, cx, cy)));
+    const D = grids.map(down2);
+    const px = (tf.x - (cx - 1)) * 256, py = (tf.y - (cy - 1)) * 256;
+    const kmPx = 156543.03 * Math.cos(lat * Math.PI / 180) / 2 ** RV_Z / 1000;
+
+    // การเคลื่อนตัวปัจจุบันและภาพคาดการณ์
+    const F = motionField([[D[3], D[4]], [D[4], D[5]], [D[5], D[6]]]);
+    const VF = upsampleField(F);
+    const last = grids[6];
+    const fc = Array.from({ length: NC_STEPS }, (_, k) => advect(last, VF, k + 1));
+
+    // ทดสอบย้อนหลัง: ทำนายจาก −30 นาที แล้วเทียบกับภาพจริงล่าสุด (ภายในโดเมนชั้นใน)
+    const Fh = motionField([[D[0], D[1]], [D[1], D[2]], [D[2], D[3]]]);
+    const Ph = neighbourhoodProb(advect(grids[3], upsampleField(Fh), 3));
+    let bN = 0, bP = 0, cnt = 0, obsWet = 0;
+    for (let y = 128; y < RV_S - 128; y += 2) {
+      for (let x = 128; x < RV_S - 128; x += 2) {
+        const i = y * RV_S + x, o = last[i] >= RAIN_DBZ ? 1 : 0, p0 = grids[3][i] >= RAIN_DBZ ? 1 : 0;
+        bN += (Ph[i] - o) ** 2; bP += (p0 - o) ** 2; cnt++; obsWet += o;
+      }
+    }
+    const skill = { brierNowcast: bN / cnt, brierPersist: bP / cnt, wetFrac: obsWet / cnt };
+
+    // กลุ่มฝนที่ใกล้ที่สุด
+    let nearest = null;
+    for (let y = 0; y < RV_S; y++) {
+      for (let x = 0; x < RV_S; x++) {
+        if (last[y * RV_S + x] < RAIN_DBZ) continue;
+        const d2 = (x - px) ** 2 + (y - py) ** 2;
+        if (!nearest || d2 < nearest.d2) nearest = { d2, x, y };
+      }
+    }
+    if (nearest) {
+      nearest.km = Math.sqrt(nearest.d2) * kmPx;
+      nearest.dir = (Math.atan2(nearest.x - px, -(nearest.y - py)) * 180 / Math.PI + 360) % 360;
+    }
+
+    const speed = Math.hypot(F.gx, F.gy) * 2 * kmPx * 6; // กม./ชม.
+    const heading = (Math.atan2(F.gx, -F.gy) * 180 / Math.PI + 360) % 360; // ทิศที่กลุ่มฝนเคลื่อนไป
+    const t0 = use[6].time;
+    const nc = {
+      key, host: idx.host, past, cx, cy, px, py, kmPx, grids, fc, F, speed, heading, skill, nearest, t0,
+      bounds: [[tile2lat(cy + 2, RV_Z), tile2lon(cx - 1, RV_Z)], [tile2lat(cy - 1, RV_Z), tile2lon(cx + 2, RV_Z)]],
+      observed: use.map((f, k) => ({ t: f.time, ...pointStats(grids[k], px, py) })),
+      forecast: fc.map((g, k) => ({ t: t0 + (k + 1) * 600, lead: (k + 1) * 10, ...pointStats(g, px, py) })),
+    };
+    state.nowcast = nc;
+    return nc;
+  })();
+  state.nowcastJob = { key, promise };
+  promise.finally(() => { if (state.nowcastJob?.key === key) state.nowcastJob = null; });
+  return promise;
+}
+
+/** โอกาสฝนจากแบบจำลอง (Open-Meteo รายชั่วโมง) ณ เวลา unix t */
+function modelProbAt(t) {
+  const w = state.weather;
+  if (!w) return null;
+  const local = (t + w.utc_offset_seconds) / 3600;
+  const h0 = Math.floor(local);
+  const key = h => { const d = new Date(h * 3600e3); return d.toISOString().slice(0, 13); };
+  const i0 = w.hourly.time.findIndex(x => x.slice(0, 13) === key(h0));
+  if (i0 < 0) return null;
+  const a = w.hourly.precipitation_probability[i0], b = w.hourly.precipitation_probability[i0 + 1] ?? a;
+  return a == null ? null : a + (b - a) * (local - h0);
+}
+
+/** ผสมเรดาร์ + แบบจำลอง: น้ำหนักเรดาร์ 1 − lead/90 */
+function blendedSeries(nc, hours = 6) {
+  const out = [];
+  const radarAt = lead => {
+    if (lead <= 0) return nc.observed[nc.observed.length - 1].prob * 100;
+    const k = Math.min(lead / 10, NC_STEPS), k0 = Math.floor(k), k1 = Math.ceil(k);
+    const p = i => (i === 0 ? nc.observed[nc.observed.length - 1].prob : nc.forecast[i - 1].prob);
+    return (p(k0) + (p(k1) - p(k0)) * (k - k0)) * 100;
+  };
+  for (let lead = 0; lead <= hours * 60; lead += 10) {
+    const t = nc.t0 + lead * 60, m = modelProbAt(t);
+    const w = Math.max(0, 1 - lead / NC_BLEND_MIN);
+    const r = lead <= NC_STEPS * 10 ? radarAt(lead) : null;
+    out.push({ t, lead, radar: r, model: m, blend: m == null ? r : r == null ? m : w * r + (1 - w) * m });
+  }
+  return out;
+}
+
+const probColor = p => (p >= 70 ? '#1d4ed8' : p >= 40 ? '#3b82f6' : p >= 20 ? '#7dd3fc' : '#94a3b8');
+
+function nowcastSummary(nc) {
+  const ser = blendedSeries(nc, 2);
+  const at = lead => ser.find(s => s.lead === lead)?.blend ?? 0;
+  const now = nc.observed[nc.observed.length - 1];
+  const rainingNow = now.pointRate >= 0.5 || now.prob >= 0.4;
+  let eta = null;
+  if (rainingNow) {
+    const stop = ser.find(s => s.lead > 0 && s.blend < 30);
+    eta = stop ? { type: 'stop', lead: stop.lead } : null;
+  } else {
+    const start = ser.find(s => s.lead > 0 && s.blend >= 50);
+    eta = start ? { type: 'start', lead: start.lead } : null;
+  }
+  return { ser, p30: at(30), p60: at(60), p90: at(90), now, rainingNow, eta };
+}
+
+function motionSvg(nc, size = 84) {
+  const c = size / 2, moving = nc.speed >= 5;
+  const a = (nc.heading - 90) * Math.PI / 180, L = c * 0.7;
+  return `<svg viewBox="0 0 ${size} ${size}">
+    <circle cx="${c}" cy="${c}" r="${c - 2}" fill="var(--surface-2)" stroke="var(--border)"/>
+    <text x="${c}" y="11" text-anchor="middle" font-size="9" fill="var(--muted)">N</text>
+    ${moving ? `<defs><marker id="mh" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker></defs>
+    <line x1="${c - L * Math.cos(a)}" y1="${c - L * Math.sin(a)}" x2="${c + L * Math.cos(a)}" y2="${c + L * Math.sin(a)}" stroke="#2563eb" stroke-width="4" marker-end="url(#mh)"/>`
+    : `<circle cx="${c}" cy="${c}" r="7" fill="#2563eb" opacity=".6"/>`}
+  </svg>`;
+}
+
+const motionText = nc => (nc.speed >= 5
+  ? `กลุ่มฝนเคลื่อนตัวไปทาง<b>${dirName(nc.heading)}</b> ~${fmt(nc.speed)} กม./ชม.`
+  : 'กลุ่มฝนแทบไม่เคลื่อนที่ (ฝนก่อตัวและสลายในพื้นที่ — มักเป็นฝนฟ้าคะนองช่วงบ่าย)');
+
+const skillText = nc => {
+  const { brierNowcast: n, brierPersist: p } = nc.skill;
+  if (nc.skill.wetFrac < 0.002) return 'ขณะนี้มีฝนในโดเมนน้อยมาก ยังประเมินความแม่นยำไม่ได้';
+  const imp = (1 - n / p) * 100;
+  return `ทดสอบย้อนหลัง 30 นาทีบนภาพจริงล่าสุด: Brier score <b>${fmt(n, 4)}</b> เทียบกับการคงสภาพ ${fmt(p, 4)} — ` +
+    (imp > 0 ? `<b style="color:#16a34a">แม่นยำกว่า ${fmt(imp)}%</b>` : `<b style="color:#dc2626">ด้อยกว่า ${fmt(-imp)}%</b>`);
+};
+
+/* ---------- การ์ดในแท็บทำนายฝน ---------- */
+
+async function renderRainRadarCard() {
+  const box = $('#rainRadar');
+  try {
+    const nc = await computeNowcast(state.loc.lat, state.loc.lon);
+    if (nc.key.split('|').slice(1).join('|') !== `${state.loc.lat}|${state.loc.lon}`) return;
+    const s = nowcastSummary(nc), off = state.weather?.utc_offset_seconds ?? BKK_OFFSET;
+    const nowTxt = s.rainingNow ? `🌧️ มีฝนบริเวณตำแหน่งของคุณ ~${fmt(s.now.rate, 1)} มม./ชม. (${rateName(s.now.rate)})`
+      : `☁️ ไม่มีฝนที่ตำแหน่งของคุณ${nc.nearest ? ` · กลุ่มฝนใกล้สุดห่าง ${fmt(nc.nearest.km)} กม. ทิศ${dirName(nc.nearest.dir)}` : ''}`;
+    const etaTxt = !s.eta ? '' : s.eta.type === 'start' ? `<li>⏱️ คาดว่า<b>ฝนจะเริ่มตกในอีก ~${s.eta.lead} นาที</b></li>` : `<li>⏱️ คาดว่า<b>ฝนจะซาลงในอีก ~${s.eta.lead} นาที</b></li>`;
+    box.innerHTML = `<div class="obs-grid">
+      <ul>
+        <li>${nowTxt} <small class="muted">(เรดาร์ ${unixHHMM(nc.t0, off)} น.)</small></li>
+        ${etaTxt}
+        <li>${motionText(nc)}</li>
+        <li>${skillText(nc)}</li>
+      </ul>
+      <div class="nc-probs">${[30, 60, 90].map(l => { const p = s[`p${l}`]; return `<div class="nc-prob"><div class="lead">อีก ${l} นาที</div><div class="pv" style="color:${probColor(p)}">${fmt(p)}%</div><div class="bar"><span style="width:${p}%;background:${probColor(p)}"></span></div></div>`; }).join('')}</div>
+    </div>
+    <p class="hint">โอกาสฝน = ผสมเรดาร์ (น้ำหนักลดจาก 100% → 0% ภายใน 90 นาที) กับแบบจำลอง · ดูแผนที่และภาพเคลื่อนไหวได้ที่แท็บ 📡 เรดาร์ฝน</p>`;
+  } catch (e) {
+    box.innerHTML = `<p class="muted">วิเคราะห์ภาพเรดาร์ไม่สำเร็จ: ${e.message}</p>`;
+  }
+}
+
+/* ---------- แท็บเรดาร์ ---------- */
+
+async function loadRadar() {
+  setStatus('radarStatus', 'กำลังดึงภาพเรดาร์ 60 นาทีล่าสุดและคำนวณการเคลื่อนตัวของกลุ่มฝน…', 'loading');
+  initRadarControls();
+  loadDrraa();
+  try {
+    for (let i = 0; i < 50 && !state.weather; i++) await new Promise(r => setTimeout(r, 300)); // รอข้อมูลแบบจำลอง
+    const [nc, idx] = await Promise.all([computeNowcast(state.loc.lat, state.loc.lon), loadRvIndex()]);
+    setStatus('radarStatus', '');
+    renderRadarHero(nc);
+    renderRadarMap(nc, idx);
+    renderRadarCharts(nc);
+  } catch (e) {
+    setStatus('radarStatus', `โหลดภาพเรดาร์ไม่สำเร็จ: ${e.message}`, 'error');
+  }
+}
+
+function renderRadarHero(nc) {
+  const s = nowcastSummary(nc), off = state.weather?.utc_offset_seconds ?? BKK_OFFSET;
+  const head = s.rainingNow ? `🌧️ ${rateName(s.now.rate)} ~${fmt(s.now.rate, 1)} มม./ชม.` : '☁️ ขณะนี้ไม่มีฝนที่ตำแหน่งของคุณ';
+  const sub = s.rainingNow ? `พื้นที่รอบตัว (รัศมี ~12 กม.) มีฝน ${fmt(s.now.prob * 100)}%`
+    : nc.nearest ? `กลุ่มฝนที่ใกล้ที่สุดห่าง <b>${fmt(nc.nearest.km)} กม.</b> ทางทิศ${dirName(nc.nearest.dir)}` : 'ไม่พบกลุ่มฝนในรัศมี ~450 กม.';
+  const eta = !s.eta ? '' : s.eta.type === 'start'
+    ? `<div class="advice-box">⏱️ คาดว่า<b>ฝนจะเริ่มตกในอีกประมาณ ${s.eta.lead} นาที</b> — เตรียมร่มหรือเลื่อนการเดินทาง</div>`
+    : `<div class="advice-box">⏱️ คาดว่า<b>ฝนจะซาลงในอีกประมาณ ${s.eta.lead} นาที</b></div>`;
+  $('#radarHero').innerHTML = `
+    <div class="card nc-main" style="--nc:${probColor(s.p30)}">
+      <div class="muted" style="font-size:.85rem">📍 ${state.loc.name} · ภาพเรดาร์ล่าสุด ${unixHHMM(nc.t0, off)} น.</div>
+      <div class="nc-now">${head}</div>
+      <div>${sub}</div>
+      <div class="nc-probs">${[30, 60, 90].map(l => { const p = s[`p${l}`]; return `<div class="nc-prob"><div class="lead">โอกาสฝนอีก ${l} นาที</div><div class="pv" style="color:${probColor(p)}">${fmt(p)}%</div><div class="bar"><span style="width:${p}%;background:${probColor(p)}"></span></div></div>`; }).join('')}</div>
+      ${eta}
+    </div>
+    <div class="card">
+      <h3>การเคลื่อนตัวของกลุ่มฝน</h3>
+      <div class="motion">${motionSvg(nc)}<div>${motionText(nc)}<div class="muted" style="font-size:.82rem;margin-top:4px">ประมาณจากภาพเรดาร์ 4 ภาพล่าสุด (30 นาที) · บล็อกที่มีฝนพอวิเคราะห์ ${nc.F.valid}/${nc.F.nb ** 2}</div></div></div>
+      <div class="skill">${skillText(nc)}<div class="muted" style="margin-top:4px">Brier score ยิ่งต่ำยิ่งแม่น · การคงสภาพ = สมมติว่าฝนอยู่ที่เดิม</div></div>
+    </div>`;
+}
+
+function initRadarControls() {
+  if (state.radarBound) return;
+  state.radarBound = true;
+  $('#rvSlider').addEventListener('input', e => showRadarFrame(+e.target.value));
+  $('#rvPrev').addEventListener('click', () => showRadarFrame(state.rvFrame - 1));
+  $('#rvNext').addEventListener('click', () => showRadarFrame(state.rvFrame + 1));
+  $('#rvPlay').addEventListener('click', () => toggleRadarPlay());
+  $('#rvOpacity').addEventListener('input', () => showRadarFrame(state.rvFrame));
+  $('#rvShowNowcast').addEventListener('change', () => { buildRadarFrames(); showRadarFrame(state.rvFrames.findIndex(f => f.last)); });
+  $('#drPlay').addEventListener('click', toggleDrPlay);
+  $('#drSlider').addEventListener('input', e => showDrFrame(+e.target.value));
+  $('#drStation').addEventListener('change', e => loadDrStation(e.target.value));
+}
+
+function gridToDataUrl(g) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = RV_S;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(RV_S, RV_S);
+  for (let i = 0; i < g.length; i++) {
+    if (g[i] < RAIN_DBZ - 10) continue; // แสดงเฉพาะสัญญาณที่มีนัยสำคัญ
+    const k = clamp(Math.round(g[i]) + 32, 0, 127) * 4;
+    img.data[i * 4] = RV_RGBA[k]; img.data[i * 4 + 1] = RV_RGBA[k + 1]; img.data[i * 4 + 2] = RV_RGBA[k + 2]; img.data[i * 4 + 3] = RV_RGBA[k + 3];
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv.toDataURL();
+}
+
+function renderRadarMap(nc, idx) {
+  if (!state.maps.radar) {
+    const map = L.map('radarMap', { zoomSnap: 0.5 });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 12, attribution: '© OpenStreetMap · Weather data © <a href="https://www.rainviewer.com" target="_blank">RainViewer</a>' }).addTo(map);
+    state.maps.radar = map;
+    state.rvLayers = L.layerGroup().addTo(map);
+    state.rvMe = L.layerGroup().addTo(map);
+  }
+  const map = state.maps.radar;
+  state.rvLayers.clearLayers();
+  state.rvMe.clearLayers();
+  // ภาพสังเกตการณ์จาก RainViewer (ไทล์) — สร้างเลเยอร์เมื่อแสดงเฟรมนั้นครั้งแรก
+  // (เพิ่มทุกเฟรมพร้อมกันทำให้ถูกจำกัดอัตราการเรียก HTTP 429) แล้วเก็บไว้เพื่อเล่นซ้ำได้ลื่น
+  state.rvPast = (idx.radar.past || []).map(f => ({
+    t: f.time, url: rvTileUrl(idx.host, f.path, '{z}', '{x}', '{y}'), layer: null,
+  }));
+  // ภาพคาดการณ์ (คำนวณเอง) วางทับโดเมนวิเคราะห์
+  state.rvFc = nc.fc.map((g, k) => ({ t: nc.t0 + (k + 1) * 600, lead: (k + 1) * 10, layer: L.imageOverlay(gridToDataUrl(g), nc.bounds, { opacity: 0, zIndex: 6 }).addTo(state.rvLayers) }));
+  L.rectangle(nc.bounds, { color: '#a855f7', weight: 1, dashArray: '6 5', fill: false, interactive: false }).addTo(state.rvMe);
+  L.marker([state.loc.lat, state.loc.lon]).bindPopup(`<b>${state.loc.name}</b>`).addTo(state.rvMe);
+  L.circle([state.loc.lat, state.loc.lon], { radius: NC_R * nc.kmPx * 1000, color: '#0f172a', weight: 1.5, fill: false, dashArray: '3 3', interactive: false }).addTo(state.rvMe);
+  if (!state.rvViewSet) { map.setView([state.loc.lat, state.loc.lon], 7); state.rvViewSet = true; } else map.panTo([state.loc.lat, state.loc.lon]);
+  buildRadarFrames();
+  showRadarFrame(state.rvFrames.findIndex(f => f.last));
+
+  const stops = [10, 20, 30, 35, 40, 45, 50, 55, 60];
+  $('#radarLegend').innerHTML = `<span><b>ความแรงฝน (dBZ):</b><span class="dbz-bar">${stops.map(d => `<span style="background:${dbzColor(d)}" title="${d} dBZ ≈ ${fmt(dbzToRate(d), 1)} มม./ชม."></span>`).join('')}</span>10 → 60 dBZ</span>` +
+    '<span>20 dBZ ≈ ฝนเล็กน้อย 0.6 มม./ชม. · 35 ≈ ปานกลาง 5.6 · 45 ≈ หนัก 24 · 55+ ≈ พายุฝนฟ้าคะนองรุนแรง</span>' +
+    '<span>กรอบประสีม่วง = พื้นที่คำนวณคาดการณ์ · วงกลมประ = รัศมี ~12 กม. ที่ใช้คิดโอกาสฝน</span>';
+}
+
+function buildRadarFrames() {
+  const withFc = $('#rvShowNowcast').checked;
+  state.rvFrames = [
+    ...state.rvPast.map((f, i, a) => ({ ...f, kind: 'obs', last: i === a.length - 1 })),
+    ...(withFc ? state.rvFc.map(f => ({ ...f, kind: 'fc' })) : []),
+  ];
+  $('#rvSlider').max = state.rvFrames.length - 1;
+}
+
+function showRadarFrame(i) {
+  const fr = state.rvFrames;
+  if (!fr?.length) return;
+  i = (i + fr.length) % fr.length;
+  state.rvFrame = i;
+  const op = +$('#rvOpacity').value / 100;
+  const cur = fr[i].kind === 'obs' ? state.rvPast.find(p => p.t === fr[i].t) : fr[i];
+  if (!cur.layer) {
+    cur.layer = L.tileLayer(cur.url, { maxNativeZoom: RV_Z, maxZoom: 12, opacity: 0, zIndex: 5 }).addTo(state.rvLayers);
+  }
+  [...state.rvPast, ...state.rvFc].forEach(f => f.layer?.setOpacity(0));
+  cur.layer.setOpacity(op);
+  $('#rvSlider').value = i;
+  const off = state.weather?.utc_offset_seconds ?? BKK_OFFSET, f = fr[i];
+  const el = $('#rvTime');
+  el.className = 'rv-time' + (f.kind === 'fc' ? ' fc' : '');
+  el.textContent = f.kind === 'fc' ? `${unixHHMM(f.t, off)} น. · คาดการณ์ +${f.lead} นาที` : `${unixHHMM(f.t, off)} น. · ภาพเรดาร์จริง${f.last ? ' (ล่าสุด)' : ''}`;
+}
+
+function toggleRadarPlay() {
+  if (state.rvTimer) {
+    clearInterval(state.rvTimer); state.rvTimer = null; $('#rvPlay').textContent = '▶';
+    return;
+  }
+  $('#rvPlay').textContent = '⏸';
+  state.rvTimer = setInterval(() => showRadarFrame(state.rvFrame + 1), 700);
+}
+
+function renderRadarCharts(nc) {
+  const off = state.weather?.utc_offset_seconds ?? BKK_OFFSET;
+  const ser = blendedSeries(nc, 6);
+  makeChart('radarProbChart', {
+    type: 'line',
+    data: {
+      labels: ser.map(s => unixHHMM(s.t, off)),
+      datasets: [
+        { label: 'ผสม (ใช้พยากรณ์)', data: ser.map(s => s.blend), borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.12)', fill: true, borderWidth: 3, pointRadius: 0, tension: .3 },
+        { label: 'เรดาร์ (nowcast)', data: ser.map(s => s.radar), borderColor: '#a855f7', borderDash: [5, 4], pointRadius: 2, tension: .3 },
+        { label: 'แบบจำลอง (Open-Meteo)', data: ser.map(s => s.model), borderColor: '#94a3b8', borderDash: [2, 3], pointRadius: 0, tension: .3 },
+      ],
+    },
+    options: {
+      scales: { x: { ticks: { maxTicksLimit: 13, maxRotation: 0 } }, y: { min: 0, max: 100, title: { display: true, text: 'โอกาสฝน (%)' } } },
+      plugins: { nowLine: { index: 0, label: 'ภาพล่าสุด' }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.raw == null ? '–' : fmt(c.raw) + '%'}` } } },
+    },
+  });
+  $('#radarSkill').innerHTML = `<p class="hint">0–90 นาทีแรกใช้เรดาร์เป็นหลัก (โอกาสฝน = สัดส่วนพื้นที่ที่มีฝนในรัศมี ~12 กม. หลังเลื่อนตามการเคลื่อนตัวของกลุ่มฝน) แล้วค่อย ๆ ส่งต่อให้แบบจำลองซึ่งแม่นยำกว่าในระยะเกิน 1–2 ชม.</p>`;
+
+  const obs = nc.observed, fc = nc.forecast;
+  const labels = [...obs.map(o => unixHHMM(o.t, off)), ...fc.map(f => unixHHMM(f.t, off))];
+  makeChart('radarRateChart', {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'สังเกตการณ์ (เรดาร์)', data: [...obs.map(o => o.rate), ...fc.map(() => null)], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,.18)', fill: true, pointRadius: 3, borderWidth: 2.5 },
+        { label: 'คาดการณ์ (nowcast)', data: [...obs.map((o, i) => (i === obs.length - 1 ? o.rate : null)), ...fc.map(f => f.rate)], borderColor: '#a855f7', borderDash: [5, 4], pointRadius: 2, borderWidth: 2.5 },
+      ],
+    },
+    options: {
+      scales: { x: { ticks: { maxRotation: 0 } }, y: { beginAtZero: true, suggestedMax: 2, title: { display: true, text: 'มม./ชม.' } } },
+      plugins: { nowLine: { index: obs.length - 1, label: 'ล่าสุด' }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.raw == null ? '–' : fmt(c.raw, 2)} มม./ชม.` } } },
+    },
+  });
+}
+
+/* ---------- เรดาร์กรมฝนหลวงและการบินเกษตร ---------- */
+
+// พิกัดโดยประมาณระดับอำเภอ ใช้เลือกสถานีที่ใกล้ที่สุดเท่านั้น
+const DRRAA_STATIONS = [
+  { id: 'omkoi', name: 'อมก๋อย จ.เชียงใหม่', lat: 17.80, lon: 98.36 },
+  { id: 'rongkwang', name: 'ร้องกวาง จ.แพร่', lat: 18.34, lon: 100.32 },
+  { id: 'banphue', name: 'บ้านผือ จ.อุดรธานี', lat: 17.69, lon: 102.48 },
+  { id: 'takhli', name: 'ตาคลี จ.นครสวรรค์', lat: 15.25, lon: 100.34 },
+  { id: 'phimai', name: 'พิมาย จ.นครราชสีมา', lat: 15.22, lon: 102.49 },
+  { id: 'rasisalai', name: 'ราษีไศล จ.ศรีสะเกษ', lat: 15.35, lon: 104.15 },
+  { id: 'sattahip', name: 'สัตหีบ จ.ชลบุรี', lat: 12.66, lon: 100.90 },
+  { id: 'pluakdaeng', name: 'ปลวกแดง จ.ระยอง', lat: 12.98, lon: 101.21 },
+  { id: 'pathio', name: 'ปะทิว จ.ชุมพร', lat: 10.72, lon: 99.31 },
+  { id: 'phanom', name: 'พนม จ.สุราษฎร์ธานี', lat: 8.86, lon: 98.82 },
+  { id: 'singha', name: 'สิงหนคร จ.สงขลา', lat: 7.24, lon: 100.55 },
+];
+
+/** รายการภาพ: ผ่าน proxy ของ server.py ก่อน (API ต้นทางไม่มี CORS) */
+async function drraaApi(station) {
+  try {
+    const r = await fetch(`/proxy/royalrain?station=${station}`, { signal: AbortSignal.timeout(40e3) });
+    if (r.ok) return await r.json();
+  } catch { /* ลองเรียกตรง */ }
+  return getJSON(`https://file.royalrain.go.th/opendata/radar_data/cappi/api.php?station=${station}`, 20e3);
+}
+
+async function loadDrraa() {
+  if (state.drLatest) return populateDrStations();
+  try {
+    const j = await drraaApi('all-only-latest');
+    state.drLatest = Object.fromEntries((j.data || []).map(d => [d.station, d]));
+    populateDrStations();
+  } catch {
+    $('#drView').innerHTML = `<div class="skeleton" style="padding:24px;text-align:left">ไม่สามารถดึงรายการภาพเรดาร์ของกรมฝนหลวงฯ ได้<br>
+      API ต้นทางไม่อนุญาตให้เบราว์เซอร์เรียกโดยตรง (ไม่มี CORS) — กรุณาเปิดเว็บผ่าน <code>python server.py</code> ซึ่งมีตัวกลาง (proxy) ให้</div>`;
+  }
+}
+
+function populateDrStations() {
+  const { lat, lon } = state.loc;
+  const list = DRRAA_STATIONS.map(s => ({ ...s, dist: haversine(lat, lon, s.lat, s.lon), latest: state.drLatest[s.id] }))
+    .sort((a, b) => a.dist - b.dist);
+  $('#drStation').innerHTML = list.map(s => `<option value="${s.id}" ${s.latest ? '' : 'disabled'}>${s.name} · ${fmt(s.dist)} กม.${s.latest ? ` · ล่าสุด ${s.latest.datetime_bangkok.slice(9)} น.` : ' · ไม่มีข้อมูล'}</option>`).join('');
+  const first = list.find(s => s.latest);
+  if (first) { $('#drStation').value = first.id; loadDrStation(first.id); }
+}
+
+async function loadDrStation(id) {
+  const view = $('#drView');
+  view.innerHTML = '<div class="skeleton">กำลังโหลดภาพเรดาร์…</div>';
+  if (state.drTimer) toggleDrPlay();
+  try {
+    const j = await drraaApi(id);
+    const frames = (j.data || []).slice(0, 20).reverse().map(d => ({ url: d.url.replace(/^http:/, 'https:'), t: d.datetime_bangkok }));
+    if (!frames.length) throw new Error('ไม่มีภาพ');
+    frames.forEach(f => { const im = new Image(); im.src = f.url; }); // preload
+    state.drFrames = frames;
+    view.innerHTML = '<img id="drImg" alt="ภาพเรดาร์">';
+    $('#drSlider').max = frames.length - 1;
+    showDrFrame(frames.length - 1);
+  } catch (e) {
+    view.innerHTML = `<div class="skeleton">โหลดภาพไม่สำเร็จ: ${e.message}</div>`;
+  }
+}
+
+function showDrFrame(i) {
+  const fr = state.drFrames;
+  if (!fr?.length || !$('#drImg')) return;
+  i = (i + fr.length) % fr.length;
+  state.drFrame = i;
+  $('#drImg').src = fr[i].url;
+  $('#drSlider').value = i;
+  const t = fr[i].t; // "YYYYMMDD HH:MM"
+  $('#drTime').textContent = `${dayLabel(`${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}`)} ${t.slice(9)} น.${i === fr.length - 1 ? ' (ล่าสุด)' : ''}`;
+}
+
+function toggleDrPlay() {
+  if (state.drTimer) {
+    clearInterval(state.drTimer); state.drTimer = null; $('#drPlay').textContent = '▶';
+    return;
+  }
+  $('#drPlay').textContent = '⏸';
+  state.drTimer = setInterval(() => showDrFrame(state.drFrame + 1), 600);
 }
 
 /* ------------------------------------------------------------------ */
