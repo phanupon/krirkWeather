@@ -1,18 +1,63 @@
 # ระบบพยากรณ์อากาศและภัยธรรมชาติ
 
 เว็บแอปพลิเคชันสำหรับพยากรณ์อากาศ ทำนายฝน วิเคราะห์ความเสี่ยงน้ำท่วม ติดตามแผ่นดินไหว และน้ำขึ้นน้ำลง
-เป็นเว็บฝั่งเบราว์เซอร์ (HTML/CSS/JavaScript) ใช้ข้อมูลจริงจาก API สาธารณะ
+หน้าเว็บ (HTML/CSS/JavaScript) อยู่ใน `public/` และ deploy บน Cloudflare Pages
+API ที่ต้องใช้คีย์ หรือไม่อนุญาตให้เบราว์เซอร์เรียกตรง จะเรียกผ่าน Pages Functions ใน `functions/` ซึ่งเก็บคีย์เป็น Secret — **ไม่มีคีย์อยู่ในหน้าเว็บหรือใน Git**
 
-## วิธีรัน
+## รันบนเครื่อง
+
+1. คัดลอก `.dev.vars.example` เป็น `.dev.vars` แล้วใส่คีย์ทั้งสาม (ไฟล์นี้ถูก `.gitignore` ไว้ จะไม่ขึ้น GitHub)
+2. รัน
 
 ```bash
 python server.py
 ```
 
-แล้วเปิด http://localhost:8080
+แล้วเปิด http://localhost:8080 — `server.py` ให้บริการ `public/` และเส้นทาง `/api/*`, `/proxy/royalrain` แบบเดียวกับ Functions บน Cloudflare
 
-`server.py` ให้บริการไฟล์ของเว็บ และเป็นตัวกลาง (proxy) ให้ API ภาพเรดาร์ของกรมฝนหลวงและการบินเกษตร ซึ่งไม่อนุญาตให้เบราว์เซอร์เรียกโดยตรง (ไม่มี CORS)
-ถ้ารันด้วย `python -m http.server` แทน ทุกแท็บยังใช้งานได้ ยกเว้นภาพเรดาร์ของกรมฝนหลวงฯ
+ถ้ามี Node.js สามารถรันด้วยระบบของ Cloudflare เองได้ (ใช้โค้ดใน `functions/` จริง และอ่าน `.dev.vars` เช่นกัน) แล้วเปิด http://localhost:8788
+
+```bash
+npx wrangler pages dev public
+```
+
+## Deploy ขึ้น Cloudflare Pages (อัปเดตอัตโนมัติเมื่อ push ขึ้น GitHub)
+
+ตั้งค่าครั้งเดียว:
+
+1. Cloudflare Dashboard → **Workers & Pages** → **Create** → แท็บ **Pages** → **Connect to Git** → เลือก repo `krirkWeather`
+2. Build settings:
+   - Framework preset: **None**
+   - Build command: *(เว้นว่าง)*
+   - Build output directory: **`public`**
+   - Root directory: *(เว้นว่าง — โฟลเดอร์ `functions/` ต้องอยู่ที่ root ของ repo)*
+3. **Save and Deploy**
+4. ไปที่โปรเจกต์ → **Settings** → **Variables and Secrets** → **Add** ชนิด **Secret** ให้ครบทั้ง Production (และ Preview ถ้าใช้):
+
+   | ชื่อ | ค่า |
+   |---|---|
+   | `WAQI_TOKEN` | token จาก https://aqicn.org/data-platform/token/ |
+   | `FIRMS_KEY` | MAP KEY จาก https://firms.modaps.eosdis.nasa.gov/api/map_key/ |
+   | `GISTDA_KEY` | API key จาก GISTDA API Gateway |
+
+5. **Deployments** → deployment ล่าสุด → **Retry deployment** (secret มีผลกับ deployment ใหม่เท่านั้น)
+
+หลังจากนั้นทุกครั้งที่ `git push` ขึ้น branch `main` Cloudflare จะ deploy ให้อัตโนมัติ (branch อื่นจะได้ Preview URL)
+
+ตรวจหลัง deploy: เปิด `https://<โปรเจกต์>.pages.dev/api/firms/data_availability/csv/all` ควรได้ตาราง CSV
+ถ้าได้ข้อความ "ยังไม่ได้ตั้งค่า secret …" แปลว่ายังตั้ง Secret ไม่ครบหรือยังไม่ได้ deploy ใหม่
+
+### เส้นทาง API ของเรา (Pages Functions)
+
+| เส้นทาง | ต้นทาง | คีย์ | แคชที่ edge |
+|---|---|---|---|
+| `/api/waqi/*` | api.waqi.info | `WAQI_TOKEN` | 10 นาที |
+| `/api/firms/*` | NASA FIRMS | `FIRMS_KEY` | 10 นาที (ข้อมูลย้อนหลัง SP 1 วัน) |
+| `/api/gistda/*` | GISTDA API Gateway | `GISTDA_KEY` | 5 นาที (burn scar 1 ชม.) |
+| `/proxy/royalrain` | กรมฝนหลวงฯ (ไม่มี CORS) | – | 2 นาที |
+
+ทุกเส้นทางรับเฉพาะ endpoint/พารามิเตอร์ที่หน้าเว็บใช้ (คำขออื่นได้ 400) เพื่อไม่ให้ถูกใช้เป็นตัวกลางเรียก API อื่นด้วยคีย์ของเรา
+และลบค่าคีย์ออกจากข้อมูลที่ตอบกลับ (GISTDA ใส่ `api_key` ไว้ในลิงก์ของผลลัพธ์)
 
 ## ฟีเจอร์
 
@@ -59,13 +104,6 @@ python server.py
 
 ทดสอบกับ 8 สถานีสุ่ม (ทำนายล่วงหน้า 72 ชม.): MAE 3.8 µg/m³ เทียบกับ CAMS โดยตรง 5.0 µg/m³
 
-> WAQI token อยู่ใน `js/app.js` (`WAQI_TOKEN`) — ขอ token ของตัวเองได้ที่ https://aqicn.org/data-platform/token/
-
-### คีย์ API
-
-คีย์ทั้งหมดอยู่ต้นแต่ละโมดูลใน `js/app.js` และมองเห็นได้ใน source ของหน้าเว็บ (เป็นเว็บฝั่งเบราว์เซอร์ล้วน):
-`WAQI_TOKEN`, `FIRMS_KEY` (NASA FIRMS MAP KEY, จำกัด 5,000 คำขอ/10 นาที), `GISTDA_KEY` (GISTDA API Gateway)
-
 ### ข้อจำกัดของ API ไฟป่าที่พบระหว่างพัฒนา
 
 - NASA FIRMS area API รับได้ครั้งละ 1–5 วัน → แอปแบ่งช่วงเวลาเป็นก้อนละ 5 วันอัตโนมัติ; country API ใช้งานไม่ได้แล้ว จึงแยกประเทศด้วยเขตแดน Natural Earth
@@ -75,10 +113,18 @@ python server.py
 ## โครงสร้างไฟล์
 
 ```
-index.html      หน้าเว็บหลัก (5 แท็บ)
-css/style.css   สไตล์ (รองรับโหมดมืด/มือถือ)
-js/app.js       ตรรกะทั้งหมด: โหลดข้อมูล วิเคราะห์ และแสดงผล
+public/                     ไฟล์ที่ Cloudflare เผยแพร่
+  index.html                หน้าเว็บหลัก
+  css/style.css             สไตล์ (รองรับโหมดมืด/มือถือ)
+  js/app.js                 ตรรกะทั้งหมด: โหลดข้อมูล วิเคราะห์ และแสดงผล (ไม่มีคีย์)
+functions/                  Cloudflare Pages Functions (ทำงานฝั่งเซิร์ฟเวอร์)
+  _lib/proxy.js             ฟังก์ชันช่วย: ส่งต่อคำขอ แคช และลบคีย์ออกจากผลลัพธ์
+  api/waqi/[[path]].js      /api/waqi/*
+  api/firms/[[path]].js     /api/firms/*
+  api/gistda/[[path]].js    /api/gistda/*
+  proxy/royalrain.js        /proxy/royalrain
+server.py                   เซิร์ฟเวอร์สำหรับรันบนเครื่อง (เส้นทางเดียวกับ functions/)
+.dev.vars.example           แม่แบบไฟล์คีย์สำหรับรันบนเครื่อง
 ```
 
 > ผลการพยากรณ์และวิเคราะห์เป็นข้อมูลประกอบการตัดสินใจเท่านั้น โปรดติดตามประกาศทางการจากกรมอุตุนิยมวิทยาและ ปภ.
-"# krirkWeather" 

@@ -1,0 +1,14 @@
+# คีย์ API สำหรับรันบนเครื่อง — ห้าม commit
+.dev.vars
+.env
+
+# Cloudflare / Node
+.wrangler/
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# ไฟล์ตั้งค่าส่วนตัวของ Claude Code
+.claude/settings.local.json

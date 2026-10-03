@@ -1824,8 +1824,8 @@ function renderRainObs(tw) {
 /* ------------------------------------------------------------------ */
 
 const A4T_BASE = 'https://air4thai.com/forweb/';
-// WAQI token ของผู้ใช้ (ออกแบบมาให้ใช้ฝั่งเบราว์เซอร์ได้) — ขอใหม่ได้ที่ https://aqicn.org/data-platform/token/
-const WAQI_TOKEN = '2d05287b0fa774bb404a076e1f21d5e0b40ee978';
+// เรียก WAQI ผ่าน /api/waqi ของเราเอง (Pages Function / server.py ใส่ token จาก secret ให้)
+const WAQI_BASE = '/api/waqi/';
 const TH_BOUNDS = [[5.6, 97.3], [20.5, 105.7]];
 const BKK_OFFSET = 7 * 3600;
 
@@ -1903,7 +1903,7 @@ function loadAir4Thai() {
 function loadWaqiBounds() {
   if (state.waqiPromise) return state.waqiPromise;
   const [[s, w], [n, e]] = TH_BOUNDS;
-  state.waqiPromise = getJSON(`https://api.waqi.info/map/bounds/?latlng=${s},${w},${n},${e}&networks=all&token=${WAQI_TOKEN}`, 30e3)
+  state.waqiPromise = getJSON(`${WAQI_BASE}map/bounds/?latlng=${s},${w},${n},${e}&networks=all`, 30e3)
     .then(j => {
       if (j.status !== 'ok') throw new Error(j.data || 'WAQI error');
       return j.data.filter(x => x.aqi !== '-' && isFinite(+x.aqi))
@@ -1914,7 +1914,7 @@ function loadWaqiBounds() {
 }
 
 async function waqiFeed(path) {
-  const j = await getJSON(`https://api.waqi.info/feed/${path}/?token=${WAQI_TOKEN}`, 20e3);
+  const j = await getJSON(`${WAQI_BASE}feed/${path}/`, 20e3);
   if (j.status !== 'ok') throw new Error(j.data || 'WAQI error');
   return j.data;
 }
@@ -2435,11 +2435,9 @@ async function renderWaqiCompare(s) {
 /*   NASA FIRMS     : จุดความร้อนประเทศเพื่อนบ้าน + ข้อมูลย้อนหลังตั้งแต่ปี 2000 */
 /* ------------------------------------------------------------------ */
 
-// คีย์ของผู้ใช้ (ใช้ฝั่งเบราว์เซอร์ จึงมองเห็นได้ใน source ของหน้าเว็บ)
-const FIRMS_KEY = '32b4fb7e858c7b910f8810ae7b5b193e';
-const GISTDA_KEY = 'iJlWI41aCyhpJYQlJGBLz99HXLVNjfjc3O2f7svqOuyR8vu9FqceSossTbiKuzjx';
-const GISTDA_BASE = 'https://api-gateway.gistda.or.th/api/2.0/resources/features/';
-const FIRMS_BASE = 'https://firms.modaps.eosdis.nasa.gov/api/';
+// เรียกผ่านเส้นทางของเราเอง ซึ่งใส่คีย์จาก secret ให้ (คีย์ไม่อยู่ในหน้าเว็บ)
+const GISTDA_BASE = '/api/gistda/';
+const FIRMS_BASE = '/api/firms/';
 const FIRE_REGION = [92, 5, 110, 24.5]; // west,south,east,north — ไทยและประเทศเพื่อนบ้าน
 const GISTDA_MAX = 6000; // ข้อมูล GISTDA ~1.6 KB/จุด และไม่บีบอัด จึงจำกัดจำนวนที่ดาวน์โหลด
 
@@ -2532,7 +2530,7 @@ function countryOf(countries, lat, lon) {
 
 /** จุดความร้อนในไทยจาก GISTDA (แบ่งหน้าละ 1,000 ดาวน์โหลดพร้อมกัน) */
 async function loadGistdaHotspots(period) {
-  const url = off => `${GISTDA_BASE}viirs/${period}?limit=1000&offset=${off}&ct_en=Thailand&api_key=${GISTDA_KEY}`;
+  const url = off => `${GISTDA_BASE}viirs/${period}?limit=1000&offset=${off}&ct_en=Thailand`;
   const first = await getJSON(url(0), 60e3);
   const total = first.numberMatched ?? first.features.length;
   const pages = [];
@@ -2579,7 +2577,9 @@ function parseFirmsCsv(text, countries, now) {
 /** ชื่อชุดข้อมูล FIRMS: NRT (ล่าสุด ~3 เดือน) หรือ SP (ข้อมูลมาตรฐานย้อนหลัง) ตามวันที่ */
 async function firmsSource(sat, startDate) {
   if (!state.firmsAvail) {
-    const csv = await fetch(`${FIRMS_BASE}data_availability/csv/${FIRMS_KEY}/all`).then(r => r.text());
+    const res = await fetch(`${FIRMS_BASE}data_availability/csv/all`);
+    const csv = await res.text();
+    if (!res.ok) throw new Error(csv.slice(0, 160));
     state.firmsAvail = Object.fromEntries(csv.trim().split('\n').slice(1).map(l => { const [id, a, b] = l.split(','); return [id, [a, b]]; }));
   }
   const ok = id => state.firmsAvail[id] && (!startDate || (startDate >= state.firmsAvail[id][0] && startDate <= state.firmsAvail[id][1]));
@@ -2601,7 +2601,7 @@ async function loadFirms(sat, days, startDate, countries) {
   }
   const results = await Promise.all(chunks.map(async c => {
     const src = await firmsSource(sat, c.date);
-    const url = `${FIRMS_BASE}area/csv/${FIRMS_KEY}/${src}/${FIRE_REGION.join(',')}/${c.days}${c.date ? '/' + c.date : ''}`;
+    const url = `${FIRMS_BASE}area/csv/${src}/${FIRE_REGION.join(',')}/${c.days}${c.date ? '/' + c.date : ''}`;
     const text = await fetch(url, { signal: AbortSignal.timeout(90e3) }).then(r => r.text());
     return { list: parseFirmsCsv(text, countries, now), src };
   }));
@@ -3004,7 +3004,7 @@ async function loadBurnScar() {
   const pv = $('#fireScarProv').value;
   const info = $('#fireScarInfo');
   info.textContent = `กำลังโหลดพื้นที่เผาไหม้ จ.${pv}…`;
-  const url = off => `${GISTDA_BASE}burn-scar?limit=1000&offset=${off}&pv_tn=${encodeURIComponent(pv)}&api_key=${GISTDA_KEY}`;
+  const url = off => `${GISTDA_BASE}burn-scar?limit=1000&offset=${off}&pv_tn=${encodeURIComponent(pv)}`;
   try {
     const first = await getJSON(url(0), 90e3);
     const total = first.numberMatched ?? 0, MAX = 5000;

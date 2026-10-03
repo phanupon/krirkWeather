@@ -1,0 +1,11 @@
+# คัดลอกไฟล์นี้เป็น .dev.vars แล้วใส่คีย์จริง (ไฟล์ .dev.vars ถูก .gitignore ไว้ จะไม่ขึ้น GitHub)
+# บน Cloudflare ให้ตั้งค่าชื่อเดียวกันนี้เป็น Secret แทน
+
+# https://aqicn.org/data-platform/token/
+WAQI_TOKEN=
+
+# https://firms.modaps.eosdis.nasa.gov/api/map_key/
+FIRMS_KEY=
+
+# https://api-gateway.gistda.or.th
+GISTDA_KEY=
